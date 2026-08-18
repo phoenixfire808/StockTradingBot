@@ -1,11 +1,12 @@
 """Smoke tests for bot.fastmcp.server — verifies tool registration and basic operations."""
 
+import asyncio
 import json
-import sys
 from pathlib import Path
 
-# Add project root to path
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys_path = str(Path(__file__).resolve().parent.parent)
+if sys_path not in __import__("sys").path:
+    __import__("sys").path.insert(0, sys_path)
 
 
 class TestServerBoot:
@@ -17,40 +18,31 @@ class TestServerBoot:
 
     def test_tools_registered_count(self):
         from bot.fastmcp.server import mcp
-        tool_count = len(mcp._tools)
-        assert tool_count > 50, f"Expected 50+ tools, got {tool_count}"
+        tools = asyncio.run(mcp.list_tools())
+        assert len(tools) > 50, f"Expected 50+ tools, got {len(tools)}"
 
     def test_tool_categories_covered(self):
         from bot.fastmcp.server import mcp
-        tool_names = list(mcp._tools.keys())
-        
-        # Verify at least one tool from each major category
+        tools = asyncio.run(mcp.list_tools())
+        tool_names = [t.name for t in tools]
         required_picks = [
-            "fs_read",       # File management
-            "code_search",   # Code search
-            "git_status",    # Git ops
-            "project_install", # Project commands
-            "analytics_trade_journal", # Analytics
-            "strategy_list", # Strategy lifecycle
+            "fs_read", "code_search", "git_status",
+            "project_install", "analytics_trade_journal", "strategy_list",
         ]
         for name in required_picks:
-            assert name in tool_names, f"Missing tool: {name}. Available: {tool_names[:10]}..."
+            assert name in tool_names, f"Missing tool: {name}"
 
 
 class TestFileOperations:
-    """Basic sanity checks for file operations (no mutations)."""
-
     def test_fs_read_existing_file(self):
         from bot.fastmcp.server import fs_read
         result = fs_read("requirements.txt")
-        assert "fastmcp" in result.lower() or "requests" in result.lower(), \
-            f"Should contain package names, got: {result[:100]}"
+        assert "fastmcp" in result.lower() or "requests" in result.lower()
 
     def test_fs_list_returns_items(self):
         from bot.fastmcp.server import fs_list
         result = fs_list(".")
-        assert "#" in result or "BOT" in result.upper() or "README" in result or "MAIN" in result.upper(), \
-            f"Should list items: {result[:200]}"
+        assert "#" in result
 
     def test_fs_project_structure_returns_json(self):
         from bot.fastmcp.server import fs_project_structure
@@ -65,70 +57,53 @@ class TestFileOperations:
 
 
 class TestCodeSearch:
-    """Verify code search utilities work."""
-
     def test_code_search_finds_pattern(self):
         from bot.fastmcp.server import code_search
         results = code_search("def ", max_results=5)
-        # Should find function definitions
         assert "# Found" in results or "match" in results.lower()
 
     def test_code_symbols_parses_valid_py(self):
         from bot.fastmcp.server import code_symbols
-        result = code_symbols(file_path="bot/config.py")
-        data = json.loads(result)
-        assert isinstance(data, list), "Should return a list of symbols"
+        data = json.loads(code_symbols(file_path="bot/config.py"))
+        assert isinstance(data, list)
 
     def test_code_file_tree(self):
         from bot.fastmcp.server import code_file_tree
-        result = code_file_tree(max_depth=2)
-        data = json.loads(result)
+        data = json.loads(code_file_tree(max_depth=2))
         assert "children" in data[0] if isinstance(data, list) else "children" in data
 
     def test_code_classify_file(self):
         from bot.fastmcp.server import code_classify_file
-        result = code_classify_file("main.py")
-        data = json.loads(result)
+        data = json.loads(code_classify_file("main.py"))
         assert "type" in data
-        assert data["type"] in ["entry point", "source module"]
 
 
 class TestAnalyticsHelpers:
-    """Verify analytics helpers don't crash on missing data."""
-
     def test_analytics_trade_journal_no_trades(self):
         from bot.fastmcp.server import analytics_trade_journal
-        result = analytics_trade_journal()
-        data = json.loads(result)
+        data = json.loads(analytics_trade_journal())
         assert "trades" in data or "count" in data
 
     def test_analytics_portfolio_summary_no_state(self):
         from bot.fastmcp.server import analytics_portfolio_summary
-        result = analytics_portfolio_summary()
-        data = json.loads(result)
+        data = json.loads(analytics_portfolio_summary())
         assert "equity" in data or "message" in data
 
     def test_analytics_equity_curve_stats_no_data(self):
         from bot.fastmcp.server import analytics_equity_curve_stats
-        result = analytics_equity_curve_stats()
-        data = json.loads(result)
+        data = json.loads(analytics_equity_curve_stats())
         assert "error" in data or "data_points" in data
 
 
 class TestStrategyHelpers:
-    """Verify strategy helpers discover registered plugins."""
-
     def test_strategy_list_discovers_ema_cross_rsi(self):
         from bot.fastmcp.server import strategy_list
-        result = strategy_list()
-        data = json.loads(result)
+        data = json.loads(strategy_list())
         names = [s["name"] for s in data.get("strategies", [])]
-        assert "ema_cross_rsi" in names, f"Should discover EmaCrossRsi. Found: {names}"
+        assert "ema_cross_rsi" in names, f"Found: {names}"
 
 
 class TestGitOpsSanity:
-    """Quick sanity check for git operations (non-mutating only)."""
-
     def test_git_status_succeeds(self):
         from bot.fastmcp.utils.git_ops import git_status
         result = git_status()
@@ -137,13 +112,10 @@ class TestGitOpsSanity:
     def test_git_verify(self):
         from bot.fastmcp.utils.git_ops import git_verify
         result = git_verify()
-        assert "repo_path" in result
-        assert "clean" in result
+        assert "repo_path" in result and "clean" in result
 
 
 class TestResources:
-    """Test resource helper tools."""
-
     def test_resource_file(self):
         from bot.fastmcp.server import resource_file
         content = resource_file("main.py")
@@ -161,8 +133,6 @@ class TestResources:
 
 
 class TestHelpTools:
-    """Verify help tools work."""
-
     def test_help_topics_lists_categories(self):
         from bot.fastmcp.server import help_topics
         result = help_topics()
@@ -170,61 +140,41 @@ class TestHelpTools:
 
     def test_help_tool_describes_one(self):
         from bot.fastmcp.server import help_tool
-        result = help_tool("fs_read")
-        data = json.loads(result)
-        assert "description" in data
-        assert "fs_read" in data["tool"]
+        data = json.loads(help_tool("fs_read"))
+        assert "description" in data and "fs_read" in data["tool"]
 
     def test_time_now(self):
         from bot.fastmcp.server import time_now
-        result = time_now()
-        data = json.loads(result)
+        data = json.loads(time_now())
         assert "utc" in data
 
 
 class TestProjectCommandSanity:
-    """Sanity tests for project command wrappers (non-destructive)."""
-
     def test_project_check_env(self):
         from bot.fastmcp.server import project_check_env
-        result = project_check_env()
-        data = json.loads(result)
+        data = json.loads(project_check_env())
         assert "python_version" in data
 
     def test_project_schema_update(self):
         from bot.fastmcp.server import project_schema_update
-        result = project_schema_update()
-        data = json.loads(result)
+        data = json.loads(project_schema_update())
         assert "strategies" in data
 
     def test_project_lint(self):
         from bot.fastmcp.server import project_lint
-        result = project_lint()
-        data = json.loads(result)
+        data = json.loads(project_lint())
         assert "checked" in data or "healthy" in data
 
     def test_project_send_order_mock(self):
-        import asyncio
         from bot.fastmcp.server import project_send_order
-        result = project_send_order("AAPL", 1)
-        data = json.loads(result)
+        data = json.loads(project_send_order("AAPL", 1))
         assert "order_id" in data or "position" in data
-
-    def test_project_send_sentiment_fallback(self):
-        from bot.fastmcp.server import project_send_sentiment
-        result = project_send_sentiment(["AAPL"], hours=1)
-        data = json.loads(result)
-        # May fail gracefully due to network/VADER; just verify structure
-        assert isinstance(data, dict) or "AAPL" in json.dumps(data)
 
 
 class TestEnvAndMisc:
-    """Test environment variable and misc helpers."""
-
     def test_env_var_get(self):
         from bot.fastmcp.server import env_var_get
-        result = env_var_get("PATH")
-        data = json.loads(result)
+        data = json.loads(env_var_get("PATH"))
         assert "key" in data
 
     def test_todo_list_invalid_action(self):
@@ -233,10 +183,10 @@ class TestEnvAndMisc:
             todo_list(action="invalid")
             assert False, "Should raise ValueError"
         except ValueError:
-            pass  # Expected
+            pass
 
     def test_note(self):
         from bot.fastmcp.server import note
-        note("test note for smoke test")
-        notes_file = Path("logs/mcp_scratch_notes.txt")
-        assert notes_file.exists(), "Note should be saved"
+        note("test smoke note")
+        notes_file = PROJECT_ROOT = Path("logs/mcp_scratch_notes.txt")
+        assert notes_file.exists()

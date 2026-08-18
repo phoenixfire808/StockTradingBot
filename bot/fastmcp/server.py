@@ -19,13 +19,10 @@ import time
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
-
 from fastmcp import FastMCP
-
 mcp = FastMCP(
     name="StockTradingBot",
-    description=(
+    instructions=(
         "Internal control plane for the Stock Trading Bot codebase. "
         "Manages files, code search, git, strategy plugins, analytics, backtesting, "
         "and trading operations."
@@ -1000,7 +997,7 @@ def time_now(tz=None):
 
 
 @mcp.tool()
-def http_request(method="GET", url, headers=None, body=None, timeout=10):
+def http_request(method="GET", url=None, headers=None, body=None, timeout=10):
     """Make outbound HTTP request. For external APIs/data sources."""
     import requests as req_lib
     hdrs = json.loads(headers) if isinstance(headers, str) else headers
