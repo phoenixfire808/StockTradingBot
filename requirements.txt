@@ -1,0 +1,15 @@
+mcp>=1.0.0
+httpx[sse]>=0.27
+yfinance>=0.2.30
+backtesting>=0.3.3
+pandas-ta>=0.3.14b0;python_version<"3.13"
+pandas-ta>=0.4.4b0;python_version>="3.13"
+pandas>=2.2.0
+numpy>=1.26.0
+python-dotenv>=1.0.1
+APScheduler>=3.10.4
+pytest>=8.1.0
+streamlit>=1.36.0
+plotly>=5.22.0
+vaderSentiment>=3.3.2
+requests>=2.31.0
