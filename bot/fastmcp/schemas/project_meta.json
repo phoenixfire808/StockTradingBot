@@ -48,6 +48,52 @@
       }
     },
     {
+      "name": "multi_timeframe",
+      "params": {
+        "base_strategy_name": "ema_cross_rsi",
+        "timeframes": [
+          "5m",
+          "1h",
+          "1d"
+        ],
+        "aggregation": "majority_vote",
+        "fast": 9,
+        "slow": 21,
+        "rsi_period": 14,
+        "rsi_entry_max": 70.0,
+        "rsi_exit": 75.0
+      }
+    },
+    {
+      "name": "sector_rotation",
+      "params": {
+        "base_strategy_name": "ema_cross_rsi",
+        "lookback_days": 20,
+        "momentum_threshold": 0.02,
+        "block_threshold": -0.3,
+        "boost_threshold": 0.3,
+        "fast": 9,
+        "slow": 21,
+        "rsi_period": 14,
+        "rsi_entry_max": 70.0,
+        "rsi_exit": 75.0
+      }
+    },
+    {
+      "name": "sentiment_filtered",
+      "params": {
+        "base_strategy_name": "ema_cross_rsi",
+        "fast": 9,
+        "slow": 21,
+        "rsi_period": 14,
+        "rsi_entry_max": 70.0,
+        "rsi_exit": 75.0,
+        "sentiment_threshold": 0.15,
+        "block_bearish": true,
+        "boost_bullish": true
+      }
+    },
+    {
       "name": "vwap_breakout",
       "params": {
         "vwap_period": 20,
@@ -60,11 +106,23 @@
   ],
   "datasources": [
     {
+      "name": "databento",
+      "priority": 4
+    },
+    {
+      "name": "polygon",
+      "priority": 5
+    },
+    {
       "name": "robinhood_mcp",
       "priority": 1
     },
     {
       "name": "yfinance",
+      "priority": 10
+    },
+    {
+      "name": "yfinance_crypto",
       "priority": 10
     }
   ],
@@ -76,6 +134,6 @@
       "name": "stocktwits"
     }
   ],
-  "last_updated": "2026-08-18T22:20:44.047134+00:00",
+  "last_updated": "2026-08-18T23:39:05.131617+00:00",
   "version": 1
 }

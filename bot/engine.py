@@ -18,11 +18,20 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from bot.trade_store import TradeStore, sqlite_enabled
+
 logger = logging.getLogger(__name__)
 
 
 class EngineState:
-    """Tracks engine lifecycle state and persists to disk."""
+    """Tracks engine lifecycle state and persists to disk.
+
+    Backward-compatible facade: when SQLite is enabled (env TRADE_STORE=sqlite,
+    or auto-detected when logs/trade_store.db exists) every append/save delegates
+    to bot.trade_store.TradeStore. Otherwise it falls back to the original CSV/JSON
+    files so existing deployments keep working unchanged. The CSV-writing code is
+    retained as the fallback path.
+    """
 
     def __init__(self) -> None:
         self._state_file = Path("logs/engine_state.json")
@@ -31,6 +40,10 @@ class EngineState:
         self._trades_file = Path("logs/trades.csv")
         self._signal_file = Path("logs/signals.csv")
         self._confirm_file = Path("logs/strategy_confirmed.json")
+        # SQLite store — active when feature flag is on (see sqlite_enabled()).
+        self._use_sqlite = sqlite_enabled()
+        self._store: TradeStore | None = TradeStore() if self._use_sqlite else None
+        logger.info("EngineState init: use_sqlite=%s", self._use_sqlite)
 
     def read_strategy_confirmation(self) -> dict[str, Any] | None:
         if not self._confirm_file.exists():
@@ -54,6 +67,10 @@ class EngineState:
         logger.info("Strategy confirmed: %s params=%s", strategy_name, params)
 
     def write_state(self, mode: str, strategy: str, params: dict, kill_switch: bool, equity: float, ts: str) -> None:
+        if self._use_sqlite and self._store is not None:
+            self._store.upsert_state(mode, strategy, params, kill_switch, equity, ts)
+            return
+        # ── CSV/JSON fallback ──
         state = {
             "mode": mode,
             "strategy": strategy,
@@ -67,11 +84,19 @@ class EngineState:
             json.dump(state, f, indent=2)
 
     def append_equity(self, equity: float, ts: str) -> None:
+        if self._use_sqlite and self._store is not None:
+            self._store.insert_equity(ts, equity)
+            return
+        # ── CSV fallback ──
         self._equity_file.parent.mkdir(parents=True, exist_ok=True)
         with open(self._equity_file, "a") as f:
             f.write(f"{ts},{equity}\n")
 
     def append_trade(self, timestamp: str, symbol: str, side: str, qty: int, price: float, reason: str) -> None:
+        if self._use_sqlite and self._store is not None:
+            self._store.insert_trade(timestamp, symbol, side, qty, price, reason)
+            return
+        # ── CSV fallback ──
         self._trades_file.parent.mkdir(parents=True, exist_ok=True)
         needs_header = not self._trades_file.exists() or self._trades_file.stat().st_size == 0
         with open(self._trades_file, "a") as f:
@@ -80,6 +105,10 @@ class EngineState:
             f.write(f"{timestamp},{symbol},{side},{qty},{price:.4f},{reason}\n")
 
     def append_signal(self, timestamp: str, symbol: str, signal_val: int, reason: str) -> None:
+        if self._use_sqlite and self._store is not None:
+            self._store.insert_signal(timestamp, symbol, signal_val, reason)
+            return
+        # ── CSV fallback ──
         self._signal_file.parent.mkdir(parents=True, exist_ok=True)
         needs_header = not self._signal_file.exists() or self._signal_file.stat().st_size == 0
         with open(self._signal_file, "a") as f:
@@ -88,6 +117,9 @@ class EngineState:
             f.write(f"{timestamp},{symbol},{signal_val},{reason}\n")
 
     def read_positions(self) -> dict[str, dict]:
+        if self._use_sqlite and self._store is not None:
+            return self._store.get_positions()
+        # ── JSON fallback ──
         if not self._positions_file.exists():
             return {}
         try:
@@ -97,6 +129,10 @@ class EngineState:
             return {}
 
     def save_positions(self, positions: dict[str, dict]) -> None:
+        if self._use_sqlite and self._store is not None:
+            self._store.upsert_positions(positions)
+            return
+        # ── JSON fallback ──
         self._positions_file.parent.mkdir(parents=True, exist_ok=True)
         with open(self._positions_file, "w") as f:
             json.dump(positions, f, indent=2)
@@ -126,12 +162,25 @@ def run_engine(broker, settings, strategy_name="ema_cross_rsi", strategy_params=
         logger.error(f"Strategy '{strategy_name}' not registered. Available: {STRATEGIES.names()}")
         return
 
-    strategy_instance = strategy_cls(**effective_params)
+    strategy_instance = type(strategy_cls)(**effective_params)
     logger.info("Engine started: strategy=%s params=%s symbols=%s", strategy_name, effective_params, settings.symbols)
 
     # Risk management
     from bot.risk import KillSwitch
     kill_switch_mgr = KillSwitch(settings.max_daily_loss_pct)
+
+    # Alert notifications (Discord webhook + SMTP email)
+    from bot.alerts import AlertManager
+    alerts = AlertManager.from_env()
+    logger.info(
+        "Alerts configured: discord=%s smtp=%s",
+        alerts.config.discord_enabled, alerts.config.smtp_enabled,
+    )
+
+    # Track kill-switch trip so we only alert once per trip (re-armed on day reset)
+    kill_switch_alerted = [False]
+    # Track drawdown threshold crossings so each threshold fires once per day
+    drawdown_alerted_pct = [0.0]
 
     # Signal the running state
     last_equity = 0.0
@@ -181,14 +230,47 @@ def run_engine(broker, settings, strategy_name="ema_cross_rsi", strategy_params=
 
         # Reset kill switch for new day
         if current_day != prev_day:
+            # Send daily summary for the prior day before resetting
+            if prev_day and kill_switch_mgr.day_start_equity is not None:
+                _prev_positions = engine_state.read_positions()
+                alerts.send_daily_summary(
+                    equity=equity,
+                    day_start_equity=kill_switch_mgr.day_start_equity,
+                    positions=_prev_positions,
+                    cycle_count=cycle_counter[0],
+                )
             kill_switch_mgr.reset_day(equity)
             prev_day = current_day
             has_rebalanced_today = False
+            kill_switch_alerted[0] = False
+            drawdown_alerted_pct[0] = 0.0
+            logger.info("New trading day %s — alerts re-armed", current_day)
+
+        # Compute intra-day drawdown for advisory alert (before kill-switch)
+        if kill_switch_mgr.day_start_equity and kill_switch_mgr.day_start_equity != 0:
+            _dd_pct = ((kill_switch_mgr.day_start_equity - equity)
+                       / kill_switch_mgr.day_start_equity) * 100
+            _alert_thresh = alerts.config.drawdown_alert_pct
+            if _dd_pct >= _alert_thresh and _dd_pct > drawdown_alerted_pct[0]:
+                alerts.send_drawdown_alert(_dd_pct, equity=equity)
+                drawdown_alerted_pct[0] = _dd_pct
 
         # Check kill switch
         is_killed = kill_switch_mgr.check(equity)
         if is_killed:
             logger.warning("Kill switch active — skipping trading this cycle")
+            if not kill_switch_alerted[0]:
+                _dd_for_alert = 0.0
+                if kill_switch_mgr.day_start_equity and kill_switch_mgr.day_start_equity != 0:
+                    _dd_for_alert = ((kill_switch_mgr.day_start_equity - equity)
+                                      / kill_switch_mgr.day_start_equity) * 100
+                alerts.send_kill_switch_alert(
+                    "daily_loss_exceeded" if _dd_for_alert >= settings.max_daily_loss_pct
+                    else "manual_stop",
+                    drawdown_pct=_dd_for_alert,
+                    equity=equity,
+                )
+                kill_switch_alerted[0] = True
             engine_state.write_state("live", strategy_name, effective_params, True, equity, now_str)
             return
 
@@ -239,15 +321,16 @@ def run_engine(broker, settings, strategy_name="ema_cross_rsi", strategy_params=
                     await broker.submit_order(sym, pos["qty"], "SELL")
                     engine_state.append_trade(now_str, sym, "SELL", pos["qty"], last_price, "stop_loss")
                     engine_state.append_signal(now_str, sym, -1, "stop_loss_hit")
+                    alerts.send_fill_alert(sym, "SELL", pos["qty"], last_price, "stop_loss", equity=equity)
                     internal_pos.pop(sym)
                     continue
-
                 # Check take profit
                 if pos.get("target", 0) > 0 and last_price >= pos["target"]:
                     logger.info("TAKE PROFIT: selling %s @ %.2f (target=%.2f)", sym, last_price, pos["target"])
                     await broker.submit_order(sym, pos["qty"], "SELL")
                     engine_state.append_trade(now_str, sym, "SELL", pos["qty"], last_price, "take_profit")
                     engine_state.append_signal(now_str, sym, -1, "take_profit_hit")
+                    alerts.send_fill_alert(sym, "SELL", pos["qty"], last_price, "take_profit", equity=equity)
                     internal_pos.pop(sym)
                     continue
 
@@ -317,6 +400,7 @@ def run_engine(broker, settings, strategy_name="ema_cross_rsi", strategy_params=
                     logger.info("BUY %s qty=%d @%.2f stop=%.2f target=%.2f (order=%s)", sym, qty, last_close, sl, tp, order_id)
                     engine_state.append_trade(now_str, sym, "BUY", qty, last_close, "signal")
                     engine_state.append_signal(now_str, sym, 1, "signal_entry")
+                    alerts.send_fill_alert(sym, "BUY", qty, last_close, "signal_entry", equity=equity)
 
                     internal_pos[sym] = {
                         "qty": qty,
@@ -339,6 +423,7 @@ def run_engine(broker, settings, strategy_name="ema_cross_rsi", strategy_params=
                     logger.info("SELL %s qty=%d @%.2f (signal exit)", sym, qty, last_price)
                     engine_state.append_trade(now_str, sym, "SELL", qty, last_price, "signal_exit")
                     engine_state.append_signal(now_str, sym, -1, "signal_exit")
+                    alerts.send_fill_alert(sym, "SELL", qty, last_price, "signal_exit", equity=equity)
                     internal_pos.pop(sym)
 
             except Exception as exc:
@@ -402,3 +487,402 @@ def run_engine(broker, settings, strategy_name="ema_cross_rsi", strategy_params=
         logger.info("Keyboard interrupt — shutting down engine")
     finally:
         logger.info("Engine shutdown complete")
+def run_multi_strategy(
+    broker,
+    settings,
+    strategy_allocations: dict[str, dict],
+    equity_tracker=None,
+) -> None:
+    """Multi-strategy engine — splits capital across strategies via portfolio allocator.
+
+    Each strategy receives its share of ``settings.cash`` based on *strategy_allocations*,
+    runs over its own symbol set, and tracks per-strategy equity independently.
+
+    Parameters
+    ----------
+    broker : BotBroker
+        Broker instance (MockBroker for dry-run).
+    settings : Settings
+        Application settings (cash, risk params, interval, alerts config).
+    strategy_allocations : dict[str, dict]
+        Parsed allocation map from ``Settings.parse_strategy_allocations()`` or CLI.
+        Each entry: ``{name: {"symbols": [...], "weight": float}, ...}``.
+        Weights are normalised so they sum to 1.0 if not already.
+    equity_tracker : EquityTracker | None
+        Pre-created tracker; auto-created when None.
+
+    Backward-compatible with single-strategy flow: uses existing KillSwitch, AlertManager,
+    position reconciliation, and APScheduler loop — just parameterised per strategy.
+    """
+    from apscheduler.schedulers.blocking import BlockingScheduler
+    from bot.broker import MockBroker
+    from bot.core import STRATEGIES
+    from bot.risk import KillSwitch
+    from bot.alerts import AlertManager
+    from bot.equity_tracker import EquityTracker
+
+    # ── Validate allocations ────────────────────────────────────────
+    if not strategy_allocations:
+        logger.error("No strategy allocations provided — cannot start multi-strategy engine")
+        return
+
+    # Normalise weights so they sum to 1.0
+    total_weight = sum(v.get("weight", 0) for v in strategy_allocations.values())
+    if total_weight <= 0:
+        logger.error("Sum of strategy weights is zero — cannot split capital")
+        return
+
+    allocs = {}
+    for name, spec in strategy_allocations.items():
+        weight = spec.get("weight", 0) / total_weight
+        symbols = spec.get("symbols", [])
+        params = spec.get("params", {})
+        if not symbols:
+            logger.warning("Strategy '%s' has no symbols — skipping", name)
+            continue
+        try:
+            strategy_cls = STRATEGIES.get(name)
+        except KeyError as exc:
+            logger.error("Strategy '%s' not found in registry. Available: %s", name, STRATEGIES.names())
+            continue
+        if strategy_cls is None:
+            logger.error("Strategy '%s' not found in registry. Available: %s", name, STRATEGIES.names())
+            continue
+        allocs[name] = {"class": strategy_cls, "symbols": symbols, "weight": weight, "params": params}
+
+
+    if not allocs:
+        logger.error("No valid strategy allocations after filtering — aborting")
+        return
+
+    scheduler = BlockingScheduler()
+    engine_state = EngineState()
+    tracker = equity_tracker or EquityTracker()
+    kill_switch_mgr = KillSwitch(settings.max_daily_loss_pct)
+    alerts = AlertManager.from_env()
+
+    # ── Per-strategy tracking state ─────────────────────────────────
+    # Positions keyed by (strategy_name, symbol) → pos_dict
+    internal_pos: dict[tuple[str, str], dict] = {}
+    last_equity = [0.0]
+    cycle_counter = [0]
+    prev_day = [""]
+    has_rebalanced_today = [False]
+    kill_switch_alerted = [False]
+    drawdown_alerted_pct = [0.0]
+    trade_counts_per_day: dict[str, int] = {}  # day_key → count
+
+    # Split cash per strategy based on weight
+    strategy_cash: dict[str, float] = {
+        name: settings.cash * data["weight"] for name, data in allocs.items()
+    }
+    logger.info(
+        "Multi-strategy engine started: %d strategies, total_weight=%.2f, cash=%s",
+        len(allocs), total_weight, strategy_cash,
+    )
+    for sname, scash in strategy_cash.items():
+        sym_str = ", ".join(allocs[sname]["symbols"])
+        w = allocs[sname]["weight"] * 100
+        logger.info("  Strategy '%s': weight=%.1f%% cash=$%.2f symbols=[%s]",
+                    sname, w, scash, sym_str)
+
+    def on_sigint(signum, frame):
+        logger.info("SIGINT received — shutting down multi-strategy engine...")
+        try:
+            async def _cancel():
+                await broker.cancel_all()
+            import asyncio
+            loop = asyncio.new_event_loop()
+            try:
+                loop.run_until_complete(_cancel())
+            finally:
+                loop.close()
+        except Exception:
+            pass
+        logger.info("Engine stopped. Orders cancelled.")
+        exit(0)
+
+    signal.signal(signal.SIGINT, on_sigint)
+
+    async def _cycle():
+        nonlocal last_equity, trade_counts_per_day
+
+        now_str = datetime.utcnow().isoformat()
+        now_dt = datetime.utcnow()
+        current_day = now_dt.strftime("%Y-%m-%d")
+        cycle_counter[0] += 1
+
+        # ── New-day reset ─────────────────────────────────────────────
+        if current_day != prev_day[0]:
+            if prev_day[0] and kill_switch_mgr.day_start_equity is not None:
+                _all_positions = {}
+                for (sn, ss), sp in internal_pos.items():
+                    _all_positions[ss] = sp
+                alerts.send_daily_summary(
+                    equity=last_equity[0],
+                    day_start_equity=kill_switch_mgr.day_start_equity,
+                    positions=_all_positions,
+                    cycle_count=cycle_counter[0],
+                    trade_count=trade_counts_per_day.get(prev_day[0], 0),
+                )
+            trade_counts_per_day.clear()
+            kill_switch_mgr.reset_day(last_equity[0])
+            prev_day[0] = current_day
+            has_rebalanced_today[0] = False
+            kill_switch_alerted[0] = False
+            drawdown_alerted_pct[0] = 0.0
+            logger.info("New trading day %s — alerts re-armed", current_day)
+
+        # Read total account equity
+        try:
+            equity = await broker.get_equity()
+            last_equity[0] = equity
+        except Exception:
+            logger.warning("Could not fetch equity, continuing with previous value")
+            equity = last_equity[0]
+
+        # Drawdown advisory alert
+        if kill_switch_mgr.day_start_equity and kill_switch_mgr.day_start_equity != 0:
+            _dd_pct = ((kill_switch_mgr.day_start_equity - equity)
+                       / kill_switch_mgr.day_start_equity) * 100
+            _alert_thresh = alerts.config.drawdown_alert_pct
+            if _dd_pct >= _alert_thresh and _dd_pct > drawdown_alerted_pct[0]:
+                alerts.send_drawdown_alert(_dd_pct, equity=equity)
+                drawdown_alerted_pct[0] = _dd_pct
+
+        # Kill-switch check
+        is_killed = kill_switch_mgr.check(equity)
+        if is_killed:
+            logger.warning("Kill switch active — skipping all strategy cycles")
+            if not kill_switch_alerted[0]:
+                _dd_for_alert = 0.0
+                if kill_switch_mgr.day_start_equity and kill_switch_mgr.day_start_equity != 0:
+                    _dd_for_alert = ((kill_switch_mgr.day_start_equity - equity)
+                                      / kill_switch_mgr.day_start_equity) * 100
+                alerts.send_kill_switch_alert(
+                    "daily_loss_exceeded" if _dd_for_alert >= settings.max_daily_loss_pct
+                    else "manual_stop",
+                    drawdown_pct=_dd_for_alert,
+                    equity=equity,
+                )
+                kill_switch_alerted[0] = True
+            engine_state.write_state("multi_strategy", list(allocs.keys()), {}, True, equity, now_str)
+            return
+
+        # Track trades for daily summary
+        trade_counts_per_day[current_day] = trade_counts_per_day.get(current_day, 0) + sum(
+            1 for (_, _sym), _pos in internal_pos.items() if _pos.get("qty", 0) > 0
+        )
+
+        # ── Per-strategy cycle ────────────────────────────────────────
+        for strategy_name, sdata in allocs.items():
+            await _strategy_cycle(
+                strategy_name=strategy_name,
+                broker=broker,
+                alloc=sdata,
+                strategy_cash=strategy_cash,
+                internal_pos=internal_pos,
+                engine_state=engine_state,
+                alerts=alerts,
+                tracker=tracker,
+                now_str=now_str,
+                equity=equity,
+                settings=settings,
+            )
+
+        # Save consolidated positions
+        _consolidated = {}
+        for (sn, ss), sp in internal_pos.items():
+            _consolidated[ss] = sp
+        engine_state.save_positions(_consolidated)
+
+        # Persist total equity
+        engine_state.append_equity(equity, now_str)
+
+        # Record per-strategy equity snapshots
+        for sn, scash in strategy_cash.items():
+            tracker.record(sn, scash, now_str)
+
+        logger.info(
+            "Multi-strategy cycle %d complete: equity=%.2f positions=%d strategies=%d rebalanced=%s",
+            cycle_counter[0], equity, len(internal_pos), len(allocs), has_rebalanced_today[0],
+        )
+
+    async def _strategy_cycle(
+        strategy_name, broker, alloc, strategy_cash, internal_pos,
+        engine_state, alerts, tracker, now_str, equity, settings,
+    ):
+        """Run one strategy's full cycle: reconcile exits, entries."""
+        sym_list = alloc["symbols"]
+        weight = alloc["weight"]
+        params = alloc["params"]
+        strat_cash = strategy_cash.get(strategy_name, settings.cash * weight)
+
+        strategy_cls = alloc["class"]
+        strategy_instance = type(strategy_cls)(**params)
+        logger.debug("[%s] Starting cycle (cash=$%.2f, symbols=%s)",
+                     strategy_name, strat_cash, sym_list)
+
+        # Position key prefix for this strategy
+        def _k(sym):
+            return (strategy_name, sym)
+
+        # Reconcile positions for this strategy's symbols
+        try:
+            broker_pos = await broker.get_positions()
+        except Exception as exc:
+            logger.warning("[%s] Position fetch failed: %s", strategy_name, exc)
+            broker_pos = {}
+
+        # Adopt external positions
+        for sym in sym_list:
+            qty = broker_pos.get(sym, 0)
+            if qty > 0 and _k(sym) not in internal_pos:
+                logger.info("[%s] Adopted external position: %s qty=%d", strategy_name, sym, qty)
+                internal_pos[_k(sym)] = {
+                    "qty": qty, "entry_price": 0, "entry_ts": now_str,
+                    "stop": 0, "target": 0, "strategy": strategy_name,
+                }
+
+        # Drop positions no longer on broker
+        for sym in sym_list:
+            k = _k(sym)
+            if k in internal_pos and (sym not in broker_pos or broker_pos.get(sym, 0) <= 0):
+                removed = internal_pos.pop(k)
+                logger.info("[%s] Dropped stale position: %s qty=%d", strategy_name, sym, removed["qty"])
+
+        # Step 3: Manage exits (stops/targets/signals)
+        for sym in list(sym_list):
+            k = _k(sym)
+            pos = internal_pos.get(k)
+            if not pos:
+                continue
+            try:
+                quotes_result = await broker.get_quotes([sym])
+                quote_info = quotes_result.get(sym, {})
+                last_price = quote_info.get("last", quote_info.get("price", 0))
+                if last_price <= 0:
+                    continue
+
+                if pos.get("stop", 0) > 0 and last_price <= pos["stop"]:
+                    logger.info("[%s] STOP hit: selling %s @ %.2f (stop=%.2f)",
+                                strategy_name, sym, last_price, pos["stop"])
+                    await broker.submit_order(sym, pos["qty"], "SELL")
+                    engine_state.append_trade(now_str, sym, "SELL", pos["qty"], last_price, f"{strategy_name}_stop_loss")
+                    engine_state.append_signal(now_str, sym, -1, f"{strategy_name}_stop_loss_hit")
+                    alerts.send_fill_alert(sym, "SELL", pos["qty"], last_price,
+                                           f"{strategy_name}_stop_loss", equity=equity)
+                    tracker.record(strategy_name, strat_cash, now_str)
+                    del internal_pos[k]
+                    continue
+
+                if pos.get("target", 0) > 0 and last_price >= pos["target"]:
+                    logger.info("[%s] TAKE PROFIT: selling %s @ %.2f (target=%.2f)",
+                                strategy_name, sym, last_price, pos["target"])
+                    await broker.submit_order(sym, pos["qty"], "SELL")
+                    engine_state.append_trade(now_str, sym, "SELL", pos["qty"], last_price, f"{strategy_name}_take_profit")
+                    engine_state.append_signal(now_str, sym, -1, f"{strategy_name}_take_profit_hit")
+                    alerts.send_fill_alert(sym, "SELL", pos["qty"], last_price,
+                                           f"{strategy_name}_take_profit", equity=equity)
+                    tracker.record(strategy_name, strat_cash, now_str)
+                    del internal_pos[k]
+                    continue
+            except Exception as exc:
+                logger.warning("[%s] Error checking exit for %s: %s", strategy_name, sym, exc)
+
+        # Update entry prices
+        tracked_syms = [s for s in sym_list if _k(s) in internal_pos and internal_pos[_k(s)].get("entry_price", 0) == 0]
+        if tracked_syms:
+            try:
+                quotes_result = await broker.get_quotes(tracked_syms)
+                for sym in tracked_syms:
+                    q = quotes_result.get(sym, {})
+                    internal_pos[_k(s)]["entry_price"] = q.get("last", q.get("price", 0))
+            except Exception:
+                pass
+
+        # Step 4: Generate signals and execute entries/exits
+        from bot.data import fetch_latest_bars
+        from bot.risk import position_size, stop_loss as calc_stop, take_profit as calc_tp
+
+        for sym in sym_list:
+            try:
+                bars = fetch_latest_bars(sym, lookback=100)
+                if bars is None or bars.empty or len(bars) < 21:
+                    continue
+
+                signals = strategy_instance.generate_signals(bars)
+                last_signal = int(signals.iloc[-1]) if len(signals) > 0 else 0
+
+                if last_signal != 0:
+                    reason = f"strategy_signal_{strategy_name}"
+                    engine_state.append_signal(now_str, sym, last_signal, reason)
+
+                has_position = _k(sym) in internal_pos
+
+                if last_signal == 1 and not has_position:
+                    last_close = float(bars["Close"].iloc[-1])
+                    atr_val = 0
+                    if len(bars) > 14:
+                        from bot.indicators import atr as _atr_func
+                        atr_result = _atr_func(bars)
+                        atr_col = "ATRr14_14"
+                        if atr_col in atr_result:
+                            atr_val = float(atr_result[atr_col].iloc[-1])
+                        elif "High" in bars and "Low" in bars:
+                            atr_val = float(bars["High"].diff().rolling(14).max().iloc[-1])
+                        else:
+                            atr_val = 1.0
+
+                    if atr_val <= 0:
+                        atr_val = last_close * 0.02
+
+                    stop_dist = atr_val * 2
+                    qty = position_size(strat_cash, last_close, stop_dist, settings.risk_per_trade)
+                    if qty <= 0:
+                        continue
+
+                    sl = calc_stop(last_close, atr_val)
+                    tp = calc_tp(last_close, atr_val)
+
+                    order_id = await broker.submit_order(sym, qty, "BUY", stop=sl, target=tp)
+                    logger.info("[%s] BUY %s qty=%d @%.2f stop=%.2f target=%.2f (order=%s)",
+                                strategy_name, sym, qty, last_close, sl, tp, order_id)
+                    engine_state.append_trade(now_str, sym, "BUY", qty, last_close, f"{strategy_name}_signal_entry")
+                    engine_state.append_signal(now_str, sym, 1, f"{strategy_name}_signal_entry")
+                    alerts.send_fill_alert(sym, "BUY", qty, last_close,
+                                           f"{strategy_name}_signal_entry", equity=equity)
+                    internal_pos[_k(sym)] = {
+                        "qty": qty, "entry_price": last_close, "entry_ts": now_str,
+                        "stop": sl, "target": tp, "strategy": strategy_name,
+                    }
+
+                elif last_signal == -1 and has_position:
+                    qty = internal_pos[_k(sym)]["qty"]
+                    try:
+                        quotes_result = await broker.get_quotes([sym])
+                        last_price = quotes_result.get(sym, {}).get("last", last_close)
+                    except Exception:
+                        last_price = last_close
+                    await broker.submit_order(sym, qty, "SELL")
+                    logger.info("[%s] SELL %s qty=%d @%.2f (signal exit)", strategy_name, sym, qty, last_price)
+                    engine_state.append_trade(now_str, sym, "SELL", qty, last_price, f"{strategy_name}_signal_exit")
+                    engine_state.append_signal(now_str, sym, -1, f"{strategy_name}_signal_exit")
+                    alerts.send_fill_alert(sym, "SELL", qty, last_price, f"{strategy_name}_signal_exit", equity=equity)
+                    del internal_pos[_k(sym)]
+
+            except Exception as exc:
+                logger.warning("[%s] Error processing %s: %s", strategy_name, sym, exc)
+                continue
+
+    scheduler.add_job(_cycle, "interval", minutes=settings.engine_interval_minutes, id="multi_engine_cycle")
+
+    logger.info("Multi-strategy engine starting — monitoring every %d min across %d strategies",
+                settings.engine_interval_minutes, len(allocs))
+
+    try:
+        scheduler.start()
+    except KeyboardInterrupt:
+        logger.info("Keyboard interrupt — shutting down multi-strategy engine")
+    finally:
+        logger.info("Multi-strategy engine shutdown complete")

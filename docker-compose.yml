@@ -1,0 +1,41 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# StockTradingBot — local docker-compose stack.
+#
+# Default service runs the Streamlit dashboard on port 8501.
+# Override `command:` to switch modes:
+#     docker compose run --rm bot python main.py dry-run
+#     docker compose run --rm bot python main.py live
+#     docker compose run --rm bot python main.py backtest --symbols AAPL,MSFT
+# ─────────────────────────────────────────────────────────────────────────────
+name: stocktradingbot
+
+services:
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: stocktradingbot:latest
+    container_name: stocktradingbot
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      PYTHONUNBUFFERED: "1"
+      TZ: UTC
+    ports:
+      - "8501:8501"
+    volumes:
+      # Persist runtime artefacts on the host so container restarts keep
+      # trade history, equity curves, and portfolio state.
+      - ./logs:/app/logs
+      - ./data:/app/data
+      - ./reports:/app/reports
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8501/_stcore/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    # Default command: dashboard. Comment out to drop into `bash` for dev.
+    command: ["python", "main.py", "ui", "--port", "8501"]

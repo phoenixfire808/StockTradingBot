@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+from dataclasses import dataclass, field
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any
 
@@ -15,8 +16,66 @@ logger = logging.getLogger(__name__)
 
 
 class BrokerError(Exception):
-    """Raised on API / tool failures."""
-    pass
+    """Raised when a broker operation fails. Engine catches this and applies kill-switch."""
+
+
+@dataclass
+class OptionOrder:
+    """Represents an options order submitted to a broker.
+
+    Fields map to Robinhood MCP ``place_option_order`` parameters.
+    """
+    symbol: str              # underlying symbol, e.g. "AAPL"
+    quantity: int            # number of contracts
+    side: str               # "BUY" | "SELL"
+    position_effect: str    # "open" | "close"
+    legs: list[dict] = field(default_factory=list)  # [{type:"call"|"put", strike:float, expiry:"YYYY-MM-DD", side:"buy"|"sell"}]
+    order_type: str = "market"          # "market" | "limit" | "stop" | "stop_limit"
+    limit_price: float | None = None
+    stop_price: float | None = None
+    time_in_force: str = "gtc"          # "gtc" | "gfd" | "ioc" | "opg"
+    order_id: str | None = None         # filled on submit
+
+@dataclass
+class CryptoOrder:
+    """Represents a crypto order submitted to a broker.
+
+    Fields map to Robinhood MCP crypto order parameters.
+    """
+    symbol: str              # crypto pair, e.g. "BTC-USD"
+    quantity: float          # fractional quantity in base currency
+    side: str               # "BUY" | "SELL"
+    order_type: str = "market"          # "market" | "limit"
+    limit_price: float | None = None
+    time_in_force: str = "gtc"          # "gtc" | "gfd" | "ioc"
+    order_id: str | None = None         # filled on submit
+
+@dataclass
+class OptionChain:
+    """Represents an option chain entry for a given expiry/strike/type."""
+    symbol: str
+    strike: float
+    expiry: str            # "YYYY-MM-DD"
+    option_type: str       # "call" | "put"
+    bid: float = 0.0
+    ask: float = 0.0
+    mark: float = 0.0
+    volume: int = 0
+    open_interest: int = 0
+    delta: float | None = None
+    gamma: float | None = None
+    theta: float | None = None
+    vega: float | None = None
+
+@dataclass
+class CryptoQuote:
+    """Represents a real-time crypto quote."""
+    symbol: str
+    bid: float = 0.0
+    ask: float = 0.0
+    mark: float = 0.0
+    last_price: float = 0.0
+    volume_24h: float = 0.0
 
 
 class Broker(ABC):
@@ -54,6 +113,35 @@ class Broker(ABC):
     @abstractmethod
     async def test_connection(self) -> bool:
         """Verify connectivity; returns True/False."""
+        ...
+    @abstractmethod
+    async def submit_option_order(self, order: OptionOrder) -> str:
+        """Submit an options order. Returns order ID string."""
+        ...
+
+    @abstractmethod
+    async def get_option_chain(
+        self,
+        symbol: str,
+        expiry: str | None = None,
+        option_type: str | None = None,
+    ) -> list[OptionChain]:
+        """Get option chain for *symbol* filtered by expiry/type."""
+        ...
+
+    @abstractmethod
+    async def cancel_all_options(self) -> None:
+        """Cancel all open options orders."""
+        ...
+
+    @abstractmethod
+    async def submit_crypto_order(self, order: CryptoOrder) -> str:
+        """Submit a crypto order. Returns order ID string."""
+        ...
+
+    @abstractmethod
+    async def get_crypto_quotes(self, symbols: list[str]) -> dict[str, CryptoQuote]:
+        """Get real-time crypto quotes for up to N symbols."""
         ...
 
 
@@ -102,6 +190,68 @@ class MockBroker(Broker):
 
     async def test_connection(self) -> bool:
         return True
+    async def submit_option_order(self, order: OptionOrder) -> str:
+        self._order_id_counter += 1
+        mock_price = 2.50 + (hash(order.symbol) % 100) / 10.0
+        cost = order.quantity * mock_price * 100  # 1 contract = 100 shares
+        self.equity -= cost if order.side.upper() == "BUY" else -cost
+        order.order_id = f"mock-option-{self._order_id_counter}"
+        logger.info(
+            "[MOCK] OPTION %s %d %s contracts @ %.2f → EQ=%.2f",
+            order.side, order.quantity, order.symbol, mock_price, self.equity,
+        )
+        return order.order_id
+
+    async def get_option_chain(
+        self,
+        symbol: str,
+        expiry: str | None = None,
+        option_type: str | None = None,
+    ) -> list[OptionChain]:
+        import datetime as _dt
+        # Generate a synthetic mock chain
+        base_strikes = [90.0, 95.0, 100.0, 105.0, 110.0]
+        if expiry is None:
+            expiry = (_dt.date.today() + _dt.timedelta(days=30)).isoformat()
+        types = [option_type] if option_type else ["call", "put"]
+        chain = []
+        for t in types:
+            for strike in base_strikes:
+                chain.append(OptionChain(
+                    symbol=symbol, strike=strike, expiry=expiry, option_type=t,
+                    bid=max(0.50, 5.0 - abs(strike - 100) * 0.3),
+                    ask=max(0.55, 5.2 - abs(strike - 100) * 0.3),
+                    mark=max(0.52, 5.1 - abs(strike - 100) * 0.3),
+                    volume=1000, open_interest=500,
+                ))
+        logger.info("[MOCK] OPTION CHAIN %s: %d contracts", symbol, len(chain))
+        return chain
+
+    async def cancel_all_options(self) -> None:
+        logger.info("[MOCK] cancel_all_options called")
+
+    async def submit_crypto_order(self, order: CryptoOrder) -> str:
+        self._order_id_counter += 1
+        mock_price = 50000.0 + (hash(order.symbol) % 10000)
+        cost = order.quantity * mock_price
+        self.equity -= cost if order.side.upper() == "BUY" else -cost
+        order.order_id = f"mock-crypto-{self._order_id_counter}"
+        logger.info(
+            "[MOCK] CRYPTO %s %.6f %s @ %.2f → EQ=%.2f",
+            order.side, order.quantity, order.symbol, mock_price, self.equity,
+        )
+        return order.order_id
+
+    async def get_crypto_quotes(self, symbols: list[str]) -> dict[str, CryptoQuote]:
+        quotes = {}
+        for sym in symbols:
+            price = 50000.0 + (hash(sym) % 10000)
+            quotes[sym] = CryptoQuote(
+                symbol=sym, bid=price - 5.0, ask=price + 5.0,
+                mark=price, last_price=price, volume_24h=1_000_000.0,
+            )
+        logger.info("[MOCK] CRYPTO QUOTES: %d symbols", len(quotes))
+        return quotes
 
 
 # ── Robinhood MCP Broker ─────────────────────────────────────────────
@@ -297,3 +447,167 @@ class RobinhoodMcpBroker(Broker):
         except Exception as exc:
             logger.warning(f"Quotes fetch failed: {exc}")
             return {s: {} for s in symbols}
+    # ── Options & Crypto (delegated to Robinhood MCP tools) ────────────
+
+    async def submit_option_order(self, order: "OptionOrder") -> str:
+        """Submit a single- or multi-leg options order via ``place_option_order``.
+
+        Returns the broker order id. Raises BrokerError on transport / parse failure.
+        """
+        args: dict[str, Any] = {
+            "symbol": order.symbol,
+            "quantity": order.quantity,
+            "side": order.side.lower(),
+            "position_effect": order.position_effect,
+            "legs": order.legs,
+            "type": order.order_type,
+            "time_in_force": order.time_in_force,
+        }
+        if order.limit_price is not None:
+            args["limit_price"] = round(order.limit_price, 2)
+        if order.stop_price is not None:
+            args["stop_price"] = round(order.stop_price, 2)
+        logger.info(
+            "Submitting options order: %s %d %s (%s) %s",
+            order.side, order.quantity, order.symbol, order.order_type,
+            [f"{l.get('type')}@{l.get('strike')}" for l in order.legs],
+        )
+        result = await self._call_tool("place_option_order", args)
+        order_id = str(result.get("id") or result.get("orderId") or result.get("order_id") or "unknown")
+        order.order_id = order_id
+        return order_id
+
+    async def get_option_chain(
+        self,
+        symbol: str,
+        expiry: str | None = None,
+        option_type: str | None = None,
+    ) -> list["OptionChain"]:
+        """Fetch the option chain for *symbol*. Robinhood returns one chain entry per
+        (expiry, strike, type); we normalize each into ``OptionChain`` dataclass.
+        """
+        args: dict[str, Any] = {"symbol": symbol}
+        if expiry is not None:
+            args["expiry"] = expiry
+        if option_type is not None:
+            args["type"] = option_type
+        data = await self._call_tool("get_option_chain", args)
+        items: list[dict] = []
+        if isinstance(data, dict):
+            items = data.get("chain", data.get("options", data.get("items", [])))
+        elif isinstance(data, list):
+            items = data
+        chain: list[OptionChain] = []
+        for raw in items:
+            if not isinstance(raw, dict):
+                continue
+            try:
+                chain.append(OptionChain(
+                    symbol=raw.get("symbol", symbol),
+                    strike=float(raw.get("strike", 0.0)),
+                    expiry=str(raw.get("expiry") or raw.get("expiration_date") or ""),
+                    option_type=str(raw.get("type") or raw.get("option_type") or ""),
+                    bid=_safe_float(raw.get("bid")),
+                    ask=_safe_float(raw.get("ask")),
+                    mark=_safe_float(raw.get("mark") or raw.get("last_price")),
+                    volume=_safe_int(raw.get("volume")),
+                    open_interest=_safe_int(raw.get("open_interest")),
+                    delta=_safe_float(raw.get("delta")),
+                    gamma=_safe_float(raw.get("gamma")),
+                    theta=_safe_float(raw.get("theta")),
+                    vega=_safe_float(raw.get("vega")),
+                ))
+            except (TypeError, ValueError) as exc:
+                logger.debug("Skipping malformed chain entry for %s: %s", symbol, exc)
+        logger.info("Option chain %s: %d contracts", symbol, len(chain))
+        return chain
+
+    async def cancel_all_options(self) -> None:
+        """Cancel every open options order via ``get_option_orders`` + ``cancel_option_order``."""
+        try:
+            data = await self._call_tool("get_option_orders", {})
+            open_orders: list[dict] = []
+            if isinstance(data, dict):
+                open_orders = data.get("orders", data.get("items", []))
+            elif isinstance(data, list):
+                open_orders = data
+            for o in open_orders:
+                oid = o.get("id") or o.get("orderId")
+                if oid:
+                    logger.info("Cancelling option order %s", oid)
+                    await self._call_tool("cancel_option_order", {"order_id": oid})
+        except BrokerError:
+            raise
+        except Exception as exc:
+            logger.warning("cancel_all_options failed: %s", exc)
+            raise BrokerError(f"cancel_all_options failed: {exc}") from exc
+
+    async def submit_crypto_order(self, order: "CryptoOrder") -> str:
+        """Submit a crypto order via ``place_crypto_order``."""
+        args: dict[str, Any] = {
+            "symbol": order.symbol,
+            "quantity": order.quantity,
+            "side": order.side.lower(),
+            "type": order.order_type,
+            "time_in_force": order.time_in_force,
+        }
+        if order.limit_price is not None:
+            args["limit_price"] = round(order.limit_price, 2)
+        logger.info("Submitting crypto order: %s %.6f %s", order.side, order.quantity, order.symbol)
+        result = await self._call_tool("place_crypto_order", args)
+        order_id = str(result.get("id") or result.get("orderId") or result.get("order_id") or "unknown")
+        order.order_id = order_id
+        return order_id
+
+    async def get_crypto_quotes(self, symbols: list[str]) -> dict[str, "CryptoQuote"]:
+        """Fetch real-time crypto quotes via ``get_crypto_quotes``."""
+        try:
+            data = await self._call_tool("get_crypto_quotes", {"symbols": symbols})
+            out: dict[str, CryptoQuote] = {}
+            items: list[dict] | dict[str, dict] = []
+            if isinstance(data, dict):
+                items = data.get("quotes", data.get("items", {}))
+            elif isinstance(data, list):
+                items = data
+            if isinstance(items, dict):
+                iterable = items.items()
+            else:
+                iterable = [(q.get("symbol") or q.get("asset"), q) for q in items if isinstance(q, dict)]
+            for sym, raw in iterable:
+                if not sym or not isinstance(raw, dict):
+                    continue
+                out[sym] = CryptoQuote(
+                    symbol=sym,
+                    bid=_safe_float(raw.get("bid")),
+                    ask=_safe_float(raw.get("ask")),
+                    mark=_safe_float(raw.get("mark") or raw.get("last_price")),
+                    last_price=_safe_float(raw.get("last_price") or raw.get("mark")),
+                    volume_24h=_safe_float(raw.get("volume_24h") or raw.get("volume")),
+                )
+            # Ensure every requested symbol is present (fill missing with zero quote).
+            for sym in symbols:
+                out.setdefault(sym, CryptoQuote(symbol=sym))
+            logger.info("Crypto quotes: %d symbols", len(out))
+            return out
+        except Exception as exc:
+            logger.warning("get_crypto_quotes failed: %s", exc)
+            return {s: CryptoQuote(symbol=s) for s in symbols}
+
+
+def _safe_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _safe_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+

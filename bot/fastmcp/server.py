@@ -1330,42 +1330,55 @@ def backtest_compare(symbols, strategy_a="ema_cross_rsi", params_a=None, strateg
 
 
 @mcp.tool()
-def walk_forward_optimize(strategy="ema_cross_rsi", symbols="AAPL", start="2023-01-01", end="2024-01-01"):
-    """Perform walk-forward optimization — grid search over strategy parameters.
-    Splits data into training/validation windows and sweeps param grids."""
-    from itertools import product
-    
+def walk_forward_optimize(
+    strategy="ema_cross_rsi",
+    symbols="AAPL",
+    start="2023-01-01",
+    end="2024-01-01",
+    param_grid=None,
+    train_window=90,
+    test_window=30,
+    cash=100000,
+):
+    """Walk-forward optimization — grid-search strategy params on rolling
+    train/test windows and return the best out-of-sample parameter set.
+
+    Args:
+        strategy:     Registered strategy name to optimize.
+        symbols:      Ticker symbol(s) to optimize on (str or list).
+        start:        Start date YYYY-MM-DD.
+        end:          End date YYYY-MM-DD (default today).
+        param_grid:   Optional dict of param→[values] to sweep. If None,
+                      uses the strategy's default grid.
+        train_window: Training window length in days (default 90).
+        test_window:  Test (out-of-sample) window length in days (default 30).
+        cash:         Starting capital for backtests (default 100000).
+
+    Returns JSON with best_params, best_score, per-fold equity curves, and
+    total_combinations tested.
+    """
+    from bot.optimization import walk_forward_optimize as _wfo
+
     syms = symbols if isinstance(symbols, list) else [symbols]
-    
-    # Define parameter grid based on strategy
-    param_grid_map = {
-        "ema_cross_rsi": {"fast": [5, 9, 13], "slow": [13, 21, 34]},
-        "mean_reversion_rsi2": {"rsi_period": [2, 5], "rsi_oversold": [5, 10, 15]},
-        "bollinger_reversion": {"bb_period": [10, 20], "bb_std": [1.5, 2.0]},
-        "vwap_breakout": {"vwap_period": [10, 20], "vol_surge_mult": [1.2, 1.5]},
-    }
-    
-    grid = param_grid_map.get(strategy, {"fast": [5, 9, 13], "slow": [13, 21]})
-    keys = list(grid.keys())
-    values = [grid[k] for k in keys]
-    combos = list(product(*values))
-    
-    from bot.backtest import run_backtest
-    results = []
-    for combo in combos:
-        params = dict(zip(keys, combo))
-        res = run_backtest(
-            symbols=syms, start=start, end=end,
-            strategy_name=strategy, strategy_params=params,
-        )
-        for sym in syms:
-            m = res.get(sym, {}).get("metrics", {})
-            if m.get("total_return_pct") is not None:
-                results.append({**params, "symbol": sym, **m})
-    
-    # Sort by total return descending
-    results.sort(key=lambda x: x.get("total_return_pct", 0), reverse=True)
-    return json.dumps({"top_results": results[:10], "total_combinations_tested": len(results)}, indent=2)
+
+    grid = param_grid
+    if grid is not None and isinstance(grid, str):
+        try:
+            grid = json.loads(grid)
+        except (json.JSONDecodeError, TypeError):
+            grid = None
+
+    result = _wfo(
+        strategy_name=strategy,
+        param_grid=grid,
+        symbols=syms,
+        start=start,
+        end=end,
+        train_window=train_window,
+        test_window=test_window,
+        cash=float(cash),
+    )
+    return json.dumps(result, indent=2, default=str)
 
 
 @mcp.tool()

@@ -177,13 +177,13 @@ class TestWalkForwardIntegration:
         result = json.loads(walk_forward_optimize(
             strategy="ema_cross_rsi",
             symbols=["AAPL"],
-            start="2024-06-01",
-            end="2024-06-30",
+            start="2022-01-01",
+            end="2023-12-31",
         ))
 
-        assert "top_results" in result
-        assert "total_combinations_tested" in result
-        assert result["total_combinations_tested"] > 0
+        assert "folds" in result
+        assert "total_combinations" in result
+        assert result["total_combinations"] > 0
 
     def test_walk_forward_with_bollinger_params(self):
         """Walk-forward with bollinger_reversion parameters works."""
@@ -192,14 +192,14 @@ class TestWalkForwardIntegration:
         result = json.loads(walk_forward_optimize(
             strategy="bollinger_reversion",
             symbols=["AAPL"],
-            start="2024-06-01",
-            end="2024-06-30",
+            start="2022-01-01",
+            end="2023-12-31",
         ))
 
-        assert "top_results" in result
-        assert isinstance(result["top_results"], list)
-        if result["top_results"]:
-            assert "bb_period" in result["top_results"][0] or "total_return_pct" in result["top_results"][0]
+        assert "folds" in result
+        assert isinstance(result["folds"], list)
+        if result["folds"]:
+            assert "bb_period" in result["folds"][0] or "total_return_pct" in result["folds"][0]
 
 
 class TestMultiSymbolBatchBacktest:
@@ -351,13 +351,13 @@ class TestMCPToolIntegration:
         result = json.loads(walk_forward_optimize(
             strategy="ema_cross_rsi",
             symbols=["AAPL"],
-            start="2024-06-01",
-            end="2024-06-30",
+            start="2022-01-01",
+            end="2023-12-31",
         ))
 
-        assert "top_results" in result
-        assert isinstance(result["top_results"], list)
-        assert "total_combinations_tested" in result
+        assert "folds" in result
+        assert isinstance(result["folds"], list)
+        assert "total_combinations" in result
 
 
 class TestWatchlistManagement:

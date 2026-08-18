@@ -1,0 +1,80 @@
+# ── Git / VCS ─────────────────────────────────────────────────────────
+.git/
+.gitignore
+.gitattributes
+.github/
+
+# ── Python ────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+*.egg
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+.tox/
+build/
+dist/
+develop-eggs/
+downloads/
+parts/
+sdist/
+var/
+wheels/
+
+# ── Virtualenvs / tooling ────────────────────────────────────────────
+.venv/
+venv/
+env/
+.python-version
+poetry.lock
+Pipfile.lock
+
+# ── Secrets / local env ──────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+
+# ── Runtime artefacts (mounted as volumes at run time) ────────────────
+logs/*
+!logs/.gitkeep
+data/*
+!data/.gitkeep
+reports/
+.streamlit/secrets.toml
+.streamlit/config.toml.local
+
+# ── IDE / editor scratch ─────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ── Test / debug scratch ──────────────────────────────────────────────
+DEBUG_LOG.md
+PROJECT_TRACKER.md
+ROADMAP.md
+.trash/
+
+# ── Docker itself (don't recurse) ─────────────────────────────────────
+Dockerfile
+.dockerignore
+docker-compose.yml
+docker-compose.*.yml
+
+# ── Docs / references (heavy, not needed for runtime) ────────────────
+docs/
+references/
+*.md
+!README.md

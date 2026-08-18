@@ -1,5 +1,6 @@
 """Application settings and logging bootstrap."""
 
+import json
 import logging
 import os
 import sys
@@ -12,6 +13,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass
 class Settings:
@@ -22,6 +25,11 @@ class Settings:
     robinhood_mcp_command: str = ""
     robinhood_mcp_args: str = ""
 
+    # Alternative market-data providers (Polygon.io, Databento).
+    # Empty / unset = datasource disabled; reads from .env at startup.
+    polygon_api_key: str = ""
+    databento_api_key: str = ""
+
     # Trading scope
     symbols: list[str] = field(default_factory=lambda: ["AAPL", "MSFT", "NVDA"])
     cash: float = 100_000
@@ -30,6 +38,9 @@ class Settings:
     engine_interval_minutes: int = 5
     sentiment_lookback_hours: int = 24
     log_level: str = "DEBUG"
+
+    # Multi-strategy allocation JSON string
+    strategy_allocations: str = ""
 
     @property
     def auth_mode(self) -> str | None:
@@ -42,6 +53,18 @@ class Settings:
 
     def __repr__(self) -> str:
         return f"Settings(symbols={self.symbols}, mode={self.auth_mode or 'none'})"
+
+    def parse_strategy_allocations(self) -> dict[str, dict]:
+        """Parse STRATEGY_ALLOCATIONS_JSON into {name: {symbols, weight}}."""
+        if not self.strategy_allocations:
+            return {}
+        try:
+            data = json.loads(self.strategy_allocations)
+            logger.info("Parsed strategy allocations: %d strategies", len(data))
+            return data
+        except (json.JSONDecodeError, TypeError) as exc:
+            logger.warning("Failed to parse STRATEGY_ALLOCATIONS_JSON: %s", exc)
+            return {}
 
 
 def _get(key: str, default: str = "") -> str:
@@ -64,6 +87,8 @@ def load_settings() -> Settings:
         robinhood_mcp_auth_header=auth_header,
         robinhood_mcp_command=_get("ROBINHOOD_MCP_COMMAND"),
         robinhood_mcp_args=_get("ROBINHOOD_MCP_ARGS"),
+        polygon_api_key=_get("POLYGON_API_KEY"),
+        databento_api_key=_get("DATABENTO_API_KEY"),
         symbols=symbols or ["AAPL", "MSFT", "NVDA"],
         cash=float(_get("CASH", "100000")),
         risk_per_trade=float(_get("RISK_PER_TRADE", "0.01")),
@@ -71,6 +96,7 @@ def load_settings() -> Settings:
         engine_interval_minutes=int(_get("ENGINE_INTERVAL_MINUTES", "5")),
         sentiment_lookback_hours=int(_get("SENTIMENT_LOOKBACK_HOURS", "24")),
         log_level=_get("LOG_LEVEL", "DEBUG"),
+        strategy_allocations=_get("STRATEGY_ALLOCATIONS_JSON", ""),
     )
 
 

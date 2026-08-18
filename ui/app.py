@@ -30,13 +30,14 @@ st.divider()
 
 # Navigation
 st.subheader("Navigation")
-cols = st.columns(6)
+cols = st.columns(7)
 urls = {
     "📊 Dashboard": "pages/1_📊_Dashboard.py",
     "🧪 Backtest": "pages/2_🧪_Backtest.py",
     "🔬 Research": "pages/3_🔬_Research.py",
     "📜 Trades": "pages/4_📜_Trades.py",
     "📄 Logs": "pages/5_📄_Logs.py",
+    "🥧 Portfolio": "pages/7_📊_Portfolio.py",
     "⚙️ Settings": "pages/6_⚙️_Settings.py",
 }
 for col, (label, _) in enumerate(urls.items()):
