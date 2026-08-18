@@ -8,40 +8,46 @@
 - [x] **P3** Streamlit UI — Dashboard, Backtest, Research, Trades, Logs, Settings pages
 - [x] **P4** Docs: architecture, setup, troubleshooting, all API/tool references saved to `references/`
 - [x] **P5** GitHub repo created at https://github.com/phoenixfire808/StockTradingBot (private)
+- [x] **P6** Strategy expansion: VWAP Breakout, Bollinger Reversion, Momentum Scanner plugins
+- [x] **P7** Engine enhancements: daily rebalance at market open, trade journal P&L calculations, signal logging
+- [x] **P8** MCP tool suite: backtest_compare, walk_forward_optimize, daily_rebalance, trade_journal_pnl, signal_export_csv, performance_dashboard (85 total tools)
+- [x] **P9** Streamlit UI pages fully implemented: Backtest (with Run button + comparison mode), Research (ticker search + chart + fundamentals + sentiment gauge), Trades (journal with PnL colors + filters), Settings (engine status + strategy confirmation + MCP info)
+- [x] **P10** Integration test suite: 98 tests covering strategy compare, walk-forward optimization, multi-symbol batch, engine lifecycle, sentiment aggregation, watchlist management chain, all MCP tools structure verification, data pipeline caching
+- [x] **P11** CodeGraph indexing enabled for project (966 nodes, 1,659 edges)
 
 ## In Progress
 
-- [ ] **P6** Dependency install + integration testing on target machine
-- [ ] **P7** Smoke test each mode (dry-run, backtest, sentiment, UI launch)
+_Next session priorities below._
 
-## Next Phase — Operational Hardening
+## Next Phase — Advanced Features
 
-- [ ] **P8** Service autostart (Windows scheduled task / service) for persistent engine operation
-- [ ] **P9** Discord / email alerts on fills, kill-switch events, large drawdowns
-- [ ] **P10** SQLite trade store replacing CSV files (concurrent-safe, queryable)
-- [ ] **P11** True tick data plugin (Polygon.io or Databento)
-- [ ] **P12** Per-strategy equity tracking & portfolio allocation dashboard
+- [ ] **P12** Multi-strategy portfolio allocation with Kelly criterion weighting
+- [ ] **P13** Sentiment-filtered strategy (use VADER scores as signal modifier)
+- [ ] **P14** Walk-forward optimization integration with CLI and MCP tool
+- [ ] **P15** Per-strategy equity tracking & portfolio allocation dashboard in Streamlit
+- [ ] **P16** Options trading support (Robinhood Agentic account supports options)
+- [ ] **P17** Crypto trading support (Robinhood Agentic account supports crypto)
 
-## Future — Strategy Expansion
+## Future — Infrastructure Hardening
 
-- [ ] **P13** Mean-reversion strategy (Bollinger Bands + RSI-2)
-- [ ] **P14** Momentum scanner over S&P 100 universe
-- [ ] **P15** Sentiment-filtered strategy (use VADER scores as signal modifier)
-- [ ] **P16** Walk-forward optimization to fight overfitting
-- [ ] **P17** Multi-strategy portfolio allocation with Kelly criterion
+- [ ] **P18** Service autostart (Windows scheduled task / service) for persistent engine operation
+- [ ] **P19** Discord / email alerts on fills, kill-switch events, large drawdowns
+- [ ] **P20** SQLite trade store replacing CSV files (concurrent-safe, queryable)
+- [ ] **P21** True tick data plugin (Polygon.io or Databento)
+- [ ] **P22** Docker containerization for cross-platform deployment
 
 ## Future — ML Signals
 
-- [ ] **P18** Gradient-boosted feature model as signal filter (XGBoost/LightGBM)
-- [ ] **P19** Feature pipeline: technical + fundamental + sentiment features
-- [ ] **P20** Out-of-sample validation only — never deploy untested models
+- [ ] **P23** Gradient-boosted feature model as signal filter (XGBoost/LightGBM)
+- [ ] **P24** Feature pipeline: technical + fundamental + sentiment features
+- [ ] **P25** Out-of-sample validation only — never deploy untested models
 
 ## Future — Scaling
 
-- [ ] **P21** Capital review process after ≥30 active trading days
-- [ ] **P22** Per-strategy budget limits
-- [ ] **P23** Options trading (Robinhood supports options in Agentic account)
-- [ ] **P24** Crypto trading (Robinhood supports crypto in Agentic account)
+- [ ] **P26** Capital review process after ≥30 active trading days
+- [ ] **P27** Per-strategy budget limits
+- [ ] **P28** Multi-timeframe analysis (1m, 5m, 1h candles across same symbols)
+- [ ] **P29** Sector rotation detection and automatic symbol re-ranking
 
 ## Live Trading Protocol
 
