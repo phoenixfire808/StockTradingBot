@@ -44,9 +44,9 @@ class TestRSI:
 class TestATR:
     def test_atr_basic(self):
         df = pd.DataFrame({
-            "High": [10, 11, 12, 13, 14],
-            "Low": [8, 9, 10, 11, 12],
-            "Close": [9, 10, 11, 12, 13],
+            "high": [10, 11, 12, 13, 14],
+            "low": [8, 9, 10, 11, 12],
+            "close": [9, 10, 11, 12, 13],
         })
         result = atr(df, period=3)
         assert len(result.dropna()) > 0
