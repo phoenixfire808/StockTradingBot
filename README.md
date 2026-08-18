@@ -50,6 +50,7 @@ See `docs/architecture.md` for detailed plugin contracts and recipe.
 | `python main.py backtest --symbols AAPL MSFT` | Historical backtests | No |
 | `python main.py sentiment AAPL` | Quick sentiment score | No |
 | `python main.py ui` | Dashboard at localhost:8501 | Optional |
+| `python bot/fastmcp/server.py` | Launch internal MCP control plane (50+ tools) | No |
 
 Full command reference: `references/commands/cli-commands.md`.
 
@@ -72,7 +73,7 @@ D:/StockTradingBot/
 │   ├── app.py + pages/ (6 pages)
 │   └── theme.py
 ├── docs/                   # Setup, architecture, troubleshooting
-├── references/             # Research vault — all APIs, commands, sources
+├── fastmcp/              # Internal MCP server — 70+ tools for codebase management
 ├── tests/                  # Unit tests
 ├── main.py                 # CLI entry point
 ├── requirements.txt        # Dependencies
@@ -84,7 +85,34 @@ D:/StockTradingBot/
 See `ROADMAP.md` for planned features and phases.
 
 Live trading ships from day one (Phase P2). The only gate is MCP authentication + one-time strategy confirmation — no per-trade approval required. Risk controls (kill switch, position sizing, stop-losses) remain as safety mechanisms.
+## Internal MCP Server
+
+Launch the internal control plane with 70+ tools:
+
+```bash
+# Stdio mode (Claude, Cursor, OMP, etc.)
+python bot/fastmcp/server.py
+
+# SSE HTTP mode (web UI integration)
+python bot/fastmcp/server.py --transport sse --port 8765
+```
+
+### Tool Categories
+
+- **File Management** (13): read/write/edit/search/copy/move/delete/info/glob/watch/project_structure
+- **Code Search & Indexing** (9): regex grep with context, AST symbol extraction, find references/definitions, dependency graph, file classifier, docstring generator, safe rename, tree view
+- **Git Operations** (16): status/diff/add/commit/push/pull/log/branch/reset/tags/revert/grep/stash/contribution-graph
+- **Project Commands** (11): install deps, backtest, dry-run engine, pytest, lint, mock order, env check, schema refresh, sentiment, help
+- **Analytics & Portfolio** (8): trade journal queries, portfolio summary, equity curve, daily P&L, risk metrics (Sharpe/Sortino/Calmar), kill switch stats, strategy compare, backtest reports
+- **Strategy Lifecycle** (5): list/create/validate/optimize documentation for strategy plugins
+- **Resources**: persistent data exposure (file reads, log tailing, config, metadata)
+- **Helpers** (5): TODO CRUD, environment vars, time, HTTP requests, web crawl
+
+Each tool is documented via `help_topics` and `help_tool <name>`. Configuration governs rate limits, confirmation gates, and allowed hosts in `.mcp_config.json`.
+
+See `docs/architecture.md` for full server architecture.
 
 ## License
+
 
 MIT

@@ -51,3 +51,11 @@ htmlcov/
 
 # Streamlit
 .streamlit/config.toml.local
+# MCP server config (overrides)
+.mcp_config.local.json
+
+# MCP audit logs
+logs/mcp_audit.log
+
+# FastMCP temp files
+.fastmcp/

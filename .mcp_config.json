@@ -1,0 +1,15 @@
+{
+  "max_output_bytes": 102400,
+  "rate_limit_per_second": 10,
+  "confirmation_required": [
+    "fs_write",
+    "fs_edit",
+    "code_rename",
+    "git_commit",
+    "git_push",
+    "project_run_live"
+  ],
+  "allowed_http_hosts": ["localhost", "127.0.0.1"],
+  "auto_discover_plugins": true,
+  "audit_log_path": "logs/mcp_audit.log"
+}

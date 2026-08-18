@@ -13,3 +13,4 @@ streamlit>=1.36.0
 plotly>=5.22.0
 vaderSentiment>=3.3.2
 requests>=2.31.0
+fastmcp>=3.0.0
