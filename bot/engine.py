@@ -6,7 +6,8 @@ Cycle order each iteration:
   3. Exit management (stop/target/signal exits for open positions)
   4. Stale-order cleanup (cancel unmatched orders)
   5. Entry signals (new buys on positive signals)
-  6. Persist state to logs
+  6. Daily rebalance at market open
+  7. Persist state to logs
 """
 
 import json
@@ -28,6 +29,7 @@ class EngineState:
         self._positions_file = Path("logs/positions_state.json")
         self._equity_file = Path("logs/equity_history.csv")
         self._trades_file = Path("logs/trades.csv")
+        self._signal_file = Path("logs/signals.csv")
         self._confirm_file = Path("logs/strategy_confirmed.json")
 
     def read_strategy_confirmation(self) -> dict[str, Any] | None:
@@ -76,6 +78,14 @@ class EngineState:
             if needs_header:
                 f.write("timestamp,symbol,side,qty,price,reason\n")
             f.write(f"{timestamp},{symbol},{side},{qty},{price:.4f},{reason}\n")
+
+    def append_signal(self, timestamp: str, symbol: str, signal_val: int, reason: str) -> None:
+        self._signal_file.parent.mkdir(parents=True, exist_ok=True)
+        needs_header = not self._signal_file.exists() or self._signal_file.stat().st_size == 0
+        with open(self._signal_file, "a") as f:
+            if needs_header:
+                f.write("timestamp,symbol,signal,reason\n")
+            f.write(f"{timestamp},{symbol},{signal_val},{reason}\n")
 
     def read_positions(self) -> dict[str, dict]:
         if not self._positions_file.exists():
@@ -126,15 +136,11 @@ def run_engine(broker, settings, strategy_name="ema_cross_rsi", strategy_params=
     # Signal the running state
     last_equity = 0.0
     cycle_counter = [0]
+    prev_day = ""
+    has_rebalanced_today = False
 
     def on_sigint(signum, frame):
         logger.info("SIGINT received — shutting down...")
-        import asyncio
-        try:
-            import nest_asyncio
-            nest_asyncio.apply()
-        except ImportError:
-            pass
         try:
             async def _cancel():
                 await broker.cancel_all()
@@ -152,9 +158,11 @@ def run_engine(broker, settings, strategy_name="ema_cross_rsi", strategy_params=
     signal.signal(signal.SIGINT, on_sigint)
 
     async def _cycle():
-        nonlocal last_equity, cycle_counter
+        nonlocal last_equity, cycle_counter, prev_day, has_rebalanced_today
 
         now_str = datetime.utcnow().isoformat()
+        now_dt = datetime.utcnow()
+        current_day = now_dt.strftime("%Y-%m-%d")
         cycle_counter[0] += 1
 
         # Step 1: Check if market is open (unless mock)
@@ -172,16 +180,10 @@ def run_engine(broker, settings, strategy_name="ema_cross_rsi", strategy_params=
             equity = last_equity
 
         # Reset kill switch for new day
-        day_start = datetime.utcnow().strftime("%Y-%m-%d")
-        day_file = Path("logs/.current_day")
-        try:
-            saved_day = day_file.read_text().strip()
-        except FileNotFoundError:
-            saved_day = ""
-
-        if saved_day != day_start:
+        if current_day != prev_day:
             kill_switch_mgr.reset_day(equity)
-            day_file.write_text(day_start)
+            prev_day = current_day
+            has_rebalanced_today = False
 
         # Check kill switch
         is_killed = kill_switch_mgr.check(equity)
@@ -207,7 +209,7 @@ def run_engine(broker, settings, strategy_name="ema_cross_rsi", strategy_params=
                 logger.info("Adopted external position: %s qty=%d", sym, qty)
                 internal_pos[sym] = {
                     "qty": qty,
-                    "entry_price": 0,  # will be updated when we get quotes
+                    "entry_price": 0,
                     "entry_ts": now_str,
                     "stop": 0,
                     "target": 0,
@@ -220,7 +222,6 @@ def run_engine(broker, settings, strategy_name="ema_cross_rsi", strategy_params=
 
         # Step 3: Manage exits for each position
         for sym, pos in list(internal_pos.items()):
-            # Skip symbols we're not tracking
             if sym not in settings.symbols:
                 continue
 
@@ -237,6 +238,7 @@ def run_engine(broker, settings, strategy_name="ema_cross_rsi", strategy_params=
                     logger.info("STOP hit: selling %s @ %.2f (stop=%.2f)", sym, last_price, pos["stop"])
                     await broker.submit_order(sym, pos["qty"], "SELL")
                     engine_state.append_trade(now_str, sym, "SELL", pos["qty"], last_price, "stop_loss")
+                    engine_state.append_signal(now_str, sym, -1, "stop_loss_hit")
                     internal_pos.pop(sym)
                     continue
 
@@ -245,13 +247,14 @@ def run_engine(broker, settings, strategy_name="ema_cross_rsi", strategy_params=
                     logger.info("TAKE PROFIT: selling %s @ %.2f (target=%.2f)", sym, last_price, pos["target"])
                     await broker.submit_order(sym, pos["qty"], "SELL")
                     engine_state.append_trade(now_str, sym, "SELL", pos["qty"], last_price, "take_profit")
+                    engine_state.append_signal(now_str, sym, -1, "take_profit_hit")
                     internal_pos.pop(sym)
                     continue
 
             except Exception as exc:
                 logger.warning("Error checking exit for %s: %s", sym, exc)
 
-        # Update entry prices from quotes for newly adopted positions
+        # Update entry prices for newly adopted positions
         if any(p.get("entry_price", 0) == 0 for p in internal_pos.values()):
             tracked = [s for s in settings.symbols if s in internal_pos]
             if tracked:
@@ -277,6 +280,11 @@ def run_engine(broker, settings, strategy_name="ema_cross_rsi", strategy_params=
                 signals = strategy_instance.generate_signals(bars)
                 last_signal = int(signals.iloc[-1]) if len(signals) > 0 else 0
 
+                # Log signal
+                if last_signal != 0:
+                    reason = f"strategy_signal_{strategy_name}"
+                    engine_state.append_signal(now_str, sym, last_signal, reason)
+
                 has_position = sym in internal_pos
 
                 if last_signal == 1 and not has_position:
@@ -285,7 +293,14 @@ def run_engine(broker, settings, strategy_name="ema_cross_rsi", strategy_params=
                     atr_val = 0
                     if len(bars) > 14:
                         from bot.indicators import atr as _atr
-                        atr_val = _atr(bars)["ATRr14_14"].iloc[-1] if "ATRr14_14" in _atr(bars) else float(bars["High"].diff().rolling(14).max().iloc[-1]) if "High" in bars else 1.0
+                        atr_result = _atr(bars)
+                        atr_col = "ATRr14_14" if "ATRr14_14" in atr_result else "ATRr14_14"
+                        if atr_col in atr_result:
+                            atr_val = float(atr_result[atr_col].iloc[-1])
+                        elif "High" in bars and "Low" in bars:
+                            atr_val = float(bars["High"].diff().rolling(14).max().iloc[-1])
+                        else:
+                            atr_val = 1.0
 
                     if atr_val <= 0:
                         atr_val = last_close * 0.02  # fallback 2% estimate
@@ -301,6 +316,7 @@ def run_engine(broker, settings, strategy_name="ema_cross_rsi", strategy_params=
                     order_id = await broker.submit_order(sym, qty, "BUY", stop=sl, target=tp)
                     logger.info("BUY %s qty=%d @%.2f stop=%.2f target=%.2f (order=%s)", sym, qty, last_close, sl, tp, order_id)
                     engine_state.append_trade(now_str, sym, "BUY", qty, last_close, "signal")
+                    engine_state.append_signal(now_str, sym, 1, "signal_entry")
 
                     internal_pos[sym] = {
                         "qty": qty,
@@ -322,22 +338,59 @@ def run_engine(broker, settings, strategy_name="ema_cross_rsi", strategy_params=
                     await broker.submit_order(sym, qty, "SELL")
                     logger.info("SELL %s qty=%d @%.2f (signal exit)", sym, qty, last_price)
                     engine_state.append_trade(now_str, sym, "SELL", qty, last_price, "signal_exit")
+                    engine_state.append_signal(now_str, sym, -1, "signal_exit")
                     internal_pos.pop(sym)
 
             except Exception as exc:
                 logger.warning("Error processing %s: %s", sym, exc)
                 continue
 
-        # Step 5: Persist positions state
+        # Step 5: Daily rebalance at market open (once per day)
+        if current_day != prev_day and not has_rebalanced_today:
+            has_rebalanced_today = True
+            await _daily_rebalance(broker, internal_pos, settings, equity, now_str)
+
+        # Step 6: Persist positions state
         engine_state.save_positions(internal_pos)
 
         # Log equity
         engine_state.append_equity(equity, now_str)
 
         logger.info(
-            "Cycle %d complete: equity=%.2f positions=%d",
-            cycle_counter[0], equity, len(internal_pos),
+            "Cycle %d complete: equity=%.2f positions=%d rebalanced=%s",
+            cycle_counter[0], equity, len(internal_pos), has_rebalanced_today,
         )
+
+    async def _daily_rebalance(broker_obj, positions_dict, settngs_obj, eq, ts_now):
+        """Rebalance portfolio weights at market open. Ensures all tracked symbols
+        have proportional exposure based on target percentages."""
+        target_pct = 1.0 / max(len(settngs_obj.symbols), 1)
+        total_equity = eq
+        target_value = total_equity * target_pct
+        logger.info("Daily rebalance triggered: target_weight=%.1f%% per symbol", target_pct * 100)
+
+        for sym in settngs_obj.symbols:
+            if sym not in positions_dict:
+                continue
+            pos = positions_dict[sym]
+            qty = pos.get("qty", 0)
+            if qty <= 0:
+                continue
+            try:
+                quotes_result = await broker_obj.get_quotes([sym])
+                price = quotes_result.get(sym, {}).get("last", 0)
+                if price <= 0:
+                    continue
+                current_value = qty * price
+                diff = target_value - current_value
+                if abs(diff) / target_value > 0.15:  # 15% tolerance band
+                    trade_qty = int(abs(diff) / price)
+                    direction = "BUY" if diff > 0 else "SELL"
+                    await broker_obj.submit_order(sym, trade_qty, direction)
+                    logger.info("REBALANCE: %s %s %d @%.2f (curr_val=%.0f target=%.0f diff=%.0f)",
+                                sym, direction, trade_qty, price, current_value, target_value, diff)
+            except Exception as e:
+                logger.warning("Rebalance error for %s: %s", sym, e)
 
     scheduler.add_job(_cycle, "interval", minutes=settings.engine_interval_minutes, id="engine_cycle")
 

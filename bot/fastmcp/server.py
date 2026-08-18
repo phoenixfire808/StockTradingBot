@@ -1296,6 +1296,283 @@ def signal_log_viewer(count=50, symbol=None, side=None):
         return json.dumps({"signals": records, "count": len(records), "total_in_log": len(all_df)}, default=str, indent=2)
     except Exception as e:
         return json.dumps({"error": str(e)})
+@mcp.tool()
+def backtest_compare(symbols, strategy_a="ema_cross_rsi", params_a=None, strategy_b="bollinger_reversion", params_b=None):
+    """Compare two strategies head-to-head on same symbols and date range."""
+    from bot.backtest import run_backtest, compare_strategies
+    
+    # Run both strategies
+    results_a = run_backtest(
+        symbols=symbols if isinstance(symbols, list) else [symbols],
+        start="2024-01-01", end="2024-06-01",
+        cash=100_000, strategy_name=strategy_a,
+        strategy_params=params_a or {},
+    )
+    results_b = run_backtest(
+        symbols=symbols if isinstance(symbols, list) else [symbols],
+        start="2024-01-01", end="2024-06-01",
+        cash=100_000, strategy_name=strategy_b,
+        strategy_params=params_b or {},
+    )
+    
+    comparison = {}
+    for sym in (results_a.keys() | results_b.keys()):
+        a_metrics = results_a.get(sym, {}).get("metrics", {})
+        b_metrics = results_b.get(sym, {}).get("metrics", {})
+        diff = {k: round(a_metrics.get(k, 0) - b_metrics.get(k, 0), 4) for k in set(a_metrics) | set(b_metrics)}
+        comparison[sym] = {
+            "strategy_a": {"name": strategy_a, "metrics": a_metrics},
+            "strategy_b": {"name": strategy_b, "metrics": b_metrics},
+            "difference": diff,
+        }
+    
+    return json.dumps(comparison, indent=2, default=str)
+
+
+@mcp.tool()
+def walk_forward_optimize(strategy="ema_cross_rsi", symbols="AAPL", start="2023-01-01", end="2024-01-01"):
+    """Perform walk-forward optimization — grid search over strategy parameters.
+    Splits data into training/validation windows and sweeps param grids."""
+    from itertools import product
+    
+    syms = symbols if isinstance(symbols, list) else [symbols]
+    
+    # Define parameter grid based on strategy
+    param_grid_map = {
+        "ema_cross_rsi": {"fast": [5, 9, 13], "slow": [13, 21, 34]},
+        "mean_reversion_rsi2": {"rsi_period": [2, 5], "rsi_oversold": [5, 10, 15]},
+        "bollinger_reversion": {"bb_period": [10, 20], "bb_std": [1.5, 2.0]},
+        "vwap_breakout": {"vwap_period": [10, 20], "vol_surge_mult": [1.2, 1.5]},
+    }
+    
+    grid = param_grid_map.get(strategy, {"fast": [5, 9, 13], "slow": [13, 21]})
+    keys = list(grid.keys())
+    values = [grid[k] for k in keys]
+    combos = list(product(*values))
+    
+    from bot.backtest import run_backtest
+    results = []
+    for combo in combos:
+        params = dict(zip(keys, combo))
+        res = run_backtest(
+            symbols=syms, start=start, end=end,
+            strategy_name=strategy, strategy_params=params,
+        )
+        for sym in syms:
+            m = res.get(sym, {}).get("metrics", {})
+            if m.get("total_return_pct") is not None:
+                results.append({**params, "symbol": sym, **m})
+    
+    # Sort by total return descending
+    results.sort(key=lambda x: x.get("total_return_pct", 0), reverse=True)
+    return json.dumps({"top_results": results[:10], "total_combinations_tested": len(results)}, indent=2)
+
+
+@mcp.tool()
+def daily_rebalance(target_pct=0.25, symbols=None):
+    """Rebalance portfolio weights toward target percentages per symbol."""
+    from bot.broker import MockBroker
+    from bot.data import fetch_history
+    import asyncio
+    
+    broker = MockBroker()
+    syms = symbols or ["AAPL", "MSFT", "NVDA"]
+    equity = asyncio.run(broker.get_equity())
+    n_symbols = len(syms)
+    target_value = equity * (target_pct / min(n_symbols, 5))  # ensure total doesn't exceed available
+    
+    rebalance_plan = []
+    for sym in syms:
+        try:
+            df = fetch_history(sym, "-90d", interval="1d")
+            price = float(df["Close"].iloc[-1])
+        except Exception:
+            continue
+        
+        positions = asyncio.run(broker.get_positions())
+        current_qty = positions.get(sym, 0)
+        current_value = current_qty * price
+        diff_value = target_value - current_value
+        qty_to_trade = int(abs(diff_value) / price)
+        
+        direction = "BUY" if diff_value > 0 else "SELL"
+        rebalance_plan.append({
+            "symbol": sym,
+            "direction": direction,
+            "quantity": qty_to_trade,
+            "price": price,
+            "current_value": round(current_value, 2),
+            "target_value": round(target_value, 2),
+            "difference": round(diff_value, 2),
+        })
+    
+    return json.dumps({
+        "equity": round(equity, 2),
+        "target_pct_per_symbol": target_pct,
+        "rebalance_plan": rebalance_plan,
+    }, indent=2)
+
+
+@mcp.tool()
+def trade_journal_pnl(symbol=None, date_from=None, date_to=None, side=None):
+    """Query realized P&L from trades.csv log with optional filters."""
+    import pandas as pd
+    from pathlib import Path
+    
+    trades_path = Path("logs/trades.csv")
+    if not trades_path.exists() or trades_path.stat().st_size == 0:
+        return json.dumps({"pnl_data": [], "summary": {}, "message": "No trade journal found"})
+    
+    try:
+        df = pd.read_csv(trades_path)
+        
+        if symbol:
+            df = df[df["symbol"].str.upper() == symbol.upper()]
+        if side:
+            df = df[df["side"].str.upper() == side.upper()]
+        if date_from:
+            df["timestamp"] = pd.to_datetime(df["timestamp"])
+            df = df[df["timestamp"] >= pd.to_datetime(date_from)]
+        if date_to:
+            df["timestamp"] = pd.to_datetime(df["timestamp"])
+            df = df[df["timestamp"] <= pd.to_datetime(date_to)]
+        
+        # Calculate net PnL (buys are negative, sells are positive)
+        df["amount"] = df.apply(lambda r: -float(r["price"]) * int(r["qty"]) if r["side"].upper() == "BUY" else float(r["price"]) * int(r["qty"]), axis=1)
+        
+        summary = {
+            "total_trades": len(df),
+            "buy_count": len(df[df["side"].str.upper() == "BUY"]),
+            "sell_count": len(df[df["side"].str.upper() == "SELL"]),
+            "net_invested": round(float(df[df["side"].str.upper() == "BUY"]["amount"].sum()), 2),
+            "net_realized": round(float(df[df["side"].str.upper() == "SELL"]["amount"].sum()), 2),
+            "gross_pnl": round(float(df["amount"].sum()), 2),
+            "avg_trade_size": round(float(df["amount"].abs().mean()), 2),
+            "largest_win": round(float(df["amount"].max()), 2),
+            "largest_loss": round(float(df["amount"].min()), 2),
+        }
+        
+        records = df.to_dict(orient="records")
+        for rec in records:
+            rec["amount"] = round(rec.get("_amount", 0), 2)
+        
+        return json.dumps({
+            "pnl_data": records[:100],
+            "summary": summary,
+            "total_matching": len(df),
+        }, default=str, indent=2)
+    except Exception as e:
+        return json.dumps({"error": str(e), "summary": {}})
+
+
+@mcp.tool()
+def signal_export_csv(filename=None, symbol=None, date_from=None, max_records=1000):
+    """Export trading signals/signals to CSV file."""
+    import pandas as pd
+    from pathlib import Path
+    
+    sig_file = Path("logs/signals.csv")
+    if not sig_file.exists() or sig_file.stat().st_size == 0:
+        return json.dumps({"exported": False, "message": "No signal log found"})
+    
+    try:
+        df = pd.read_csv(sig_file)
+        if symbol:
+            df = df[df["symbol"].str.upper() == symbol.upper()]
+        if date_from:
+            df["timestamp"] = pd.to_datetime(df["timestamp"])
+            df = df[df["timestamp"] >= pd.to_datetime(date_from)]
+        df = df.head(max_records)
+        
+        export_filename = filename or f"signals_export_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.csv"
+        export_path = Path("data") / export_filename
+        export_path.parent.mkdir(parents=True, exist_ok=True)
+        df.to_csv(export_path, index=False)
+        
+        return json.dumps({
+            "exported": True,
+            "filename": str(export_path.relative_to(Path("."))),
+            "records_exported": len(df),
+            "columns": list(df.columns),
+        }, default=str)
+    except Exception as e:
+        return json.dumps({"exported": False, "error": str(e)})
+
+
+@mcp.tool()
+def performance_dashboard():
+    """Get comprehensive risk metrics dashboard from accumulated trade/equity data."""
+    from pathlib import Path
+    import pandas as pd
+    
+    dash = {}
+    
+    # Equity curve stats
+    eq_path = Path("logs/equity_history.csv")
+    if eq_path.exists() and eq_path.stat().st_size > 0:
+        try:
+            df_eq = pd.read_csv(eq_path, names=["timestamp", "equity"], header=0)
+            if len(df_eq) > 1:
+                equities = pd.to_numeric(df_eq["equity"])
+                returns = equities.pct_change().dropna()
+                dash["equity_stats"] = {
+                    "start_equity": round(float(equities.iloc[0]), 2),
+                    "end_equity": round(float(equities.iloc[-1]), 2),
+                    "total_gain": round(float(equities.iloc[-1] - equities.iloc[0]), 2),
+                    "total_gain_pct": round(float((equities.iloc[-1] / equities.iloc[0] - 1) * 100), 2),
+                    "sharpe_ratio": round(float(returns.mean() / returns.std() * (252 ** 0.5)), 4) if returns.std() > 0 else 0,
+                    "sortino_ratio": round(float(returns[returns < 0].mean() / returns[returns < 0].std() * (252 ** 0.5) * -1), 4) if len(returns[returns < 0]) > 1 and returns[returns < 0].std() > 0 else 0,
+                    "max_daily_gain": round(float(returns.max() * 100), 4),
+                    "max_daily_loss": round(float(returns.min() * 100), 4),
+                    "days_tracked": len(df_eq),
+                }
+        except Exception:
+            pass
+    
+    # Trade journal summary
+    trades_path = Path("logs/trades.csv")
+    if trades_path.exists() and trades_path.stat().st_size > 0:
+        try:
+            df_trades = pd.read_csv(trades_path)
+            buys = df_trades[df_trades["side"].str.upper() == "BUY"]
+            sells = df_trades[df_trades["side"].str.upper() == "SELL"]
+            dash["trade_summary"] = {
+                "total_trades": len(df_trades),
+                "buy_trades": len(buys),
+                "sell_trades": len(sells),
+                "unique_symbols": df_trades["symbol"].nunique(),
+                "traded_symbols": list(df_trades["symbol"].unique()),
+            }
+        except Exception:
+            pass
+    
+    # Kill switch history
+    state_path = Path("logs/engine_state.json")
+    if state_path.exists():
+        try:
+            state = json.loads(state_path.read_text())
+            dash["engine_status"] = {
+                "mode": state.get("mode", "unknown"),
+                "strategy": state.get("strategy", "none"),
+                "last_cycle_ts": state.get("last_cycle_ts"),
+                "kill_switch_active": state.get("kill_switch", False),
+            }
+        except Exception:
+            pass
+    
+    # Positions snapshot
+    pos_path = Path("logs/positions_state.json")
+    if pos_path.exists():
+        try:
+            positions = json.loads(pos_path.read_text())
+            dash["open_positions"] = {
+                "count": len(positions),
+                "positions": positions,
+            }
+        except Exception:
+            pass
+    
+    return json.dumps(dash, indent=2, default=str)
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()

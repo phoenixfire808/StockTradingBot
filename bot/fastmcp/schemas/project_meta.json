@@ -1,6 +1,18 @@
 {
   "strategies": [
     {
+      "name": "bollinger_reversion",
+      "params": {
+        "bb_period": 20,
+        "bb_std": 2.0,
+        "rso_period": 14,
+        "rso_oversold": 20.0,
+        "rso_overbought": 80.0,
+        "atr_stop_mult": 2.0,
+        "atr_tp_mult": 3.0
+      }
+    },
+    {
       "name": "ema_cross_rsi",
       "params": {
         "fast": 9,
@@ -34,6 +46,16 @@
         "atr_stop_multiplier": 2.0,
         "atr_tp_multiplier": 3.0
       }
+    },
+    {
+      "name": "vwap_breakout",
+      "params": {
+        "vwap_period": 20,
+        "vol_surge_mult": 1.5,
+        "stop_multiplier": 2.0,
+        "tp_multiplier": 3.0,
+        "min_volume_ratio": 1.2
+      }
     }
   ],
   "datasources": [
@@ -54,6 +76,6 @@
       "name": "stocktwits"
     }
   ],
-  "last_updated": "2026-08-18T21:51:16.722279+00:00",
+  "last_updated": "2026-08-18T22:17:56.232177+00:00",
   "version": 1
 }
