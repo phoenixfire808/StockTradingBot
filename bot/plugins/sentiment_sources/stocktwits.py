@@ -50,3 +50,5 @@ class StockTwitsSource:
             return []
         finally:
             time.sleep(1.0)  # polite rate limiting between requests
+
+plugin = StockTwitsSource()

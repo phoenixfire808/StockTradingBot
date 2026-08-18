@@ -99,3 +99,5 @@ class RobinhoodMcpSource:
         except Exception as exc:
             logger.info("Robinhood MCP datasource failed for %s [%s]: %s", symbol, interval, exc)
             raise
+
+plugin = RobinhoodMcpSource()

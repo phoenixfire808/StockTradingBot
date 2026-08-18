@@ -1,0 +1,34 @@
+{
+  "strategies": [
+    {
+      "name": "ema_cross_rsi",
+      "params": {
+        "fast": 9,
+        "slow": 21,
+        "rsi_period": 14,
+        "rsi_entry_max": 70.0,
+        "rsi_exit": 75.0
+      }
+    }
+  ],
+  "datasources": [
+    {
+      "name": "robinhood_mcp",
+      "priority": 1
+    },
+    {
+      "name": "yfinance",
+      "priority": 10
+    }
+  ],
+  "sentiment_sources": [
+    {
+      "name": "reddit"
+    },
+    {
+      "name": "stocktwits"
+    }
+  ],
+  "last_updated": "2026-08-18T20:42:49.524621+00:00",
+  "version": 1
+}

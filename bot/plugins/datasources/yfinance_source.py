@@ -64,3 +64,5 @@ class YFinanceSource:
 
         logger.info("yfinance fetched %d rows for %s [%s]", len(df), symbol, interval)
         return df[existing] if missing else df
+
+plugin = YFinanceSource()

@@ -690,20 +690,19 @@ def project_send_order(symbol, qty, side="BUY", stop=None, target=None):
 @mcp.tool()
 def project_check_env():
     """Validate environment: Python, packages, paths, git."""
-    import pkg_resources
+    from importlib.metadata import version as pkg_version, PackageNotFoundError
     checks = {
         "python_version": sys.version,
         "python_executable": sys.executable,
         "project_root": str(PROJECT_ROOT),
         "project_exists": PROJECT_ROOT.exists(),
     }
-    # Check key packages
     for pkg in ["fastmcp", "mcp", "yfinance", "backtesting", "pandas", "numpy", "streamlit", "plotly", "vaderSentiment", "APScheduler", "requests"]:
         try:
-            v = pkg_resources.get_distribution(pkg).version
+            v = pkg_version(pkg)
             checks[f"{pkg}_installed"] = True
             checks[f"{pkg}_version"] = v
-        except Exception:
+        except (PackageNotFoundError, Exception):
             checks[f"{pkg}_installed"] = False
     # Git check
     try:

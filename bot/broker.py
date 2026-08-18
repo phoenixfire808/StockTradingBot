@@ -157,7 +157,7 @@ class RobinhoodMcpBroker(Broker):
 
         await self._session.initialize()
         self._initialized = True
-        logger.info("RobinhoodMcpBroker session established (%s)", "sse" if not self._settings?.robinhood_mcp_command else "stdio")
+        logger.info("RobinhoodMcpBroker session established (%s)", "sse" if not (self._settings and self._settings.robinhood_mcp_command) else "stdio")
 
     async def _call_tool(self, tool_name: str, arguments: dict[str, Any] | None = None) -> dict:
         """Execute an MCP tool call. Logs name + arg keys (not values — never log secrets)."""

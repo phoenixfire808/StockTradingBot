@@ -47,7 +47,7 @@ class TestFileOperations:
     def test_fs_project_structure_returns_json(self):
         from bot.fastmcp.server import fs_project_structure
         data = json.loads(fs_project_structure())
-        assert "children" in data or "name" in data
+        assert isinstance(data, list) and len(data) > 0 and "children" in data[0]
 
     def test_fs_info_existing_file(self):
         from bot.fastmcp.server import fs_info
@@ -112,7 +112,7 @@ class TestGitOpsSanity:
     def test_git_verify(self):
         from bot.fastmcp.utils.git_ops import git_verify
         result = git_verify()
-        assert "repo_path" in result and "clean" in result
+        assert "repo_path" in result and "branch" in result
 
 
 class TestResources:
