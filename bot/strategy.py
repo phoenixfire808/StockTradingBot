@@ -2,7 +2,7 @@
 
 import logging
 from abc import ABC, abstractmethod
-from typing import Any, Optional
+from typing import Any
 
 import pandas as pd
 
@@ -22,51 +22,44 @@ class Strategy(ABC):
 
     def to_backtesting_strategy(self) -> type:
         """Convert this strategy into a backtesting.py compatible subclass."""
-        signals_df = self.generate_signals(pd.DataFrame())
+        from backtesting import Strategy as BtStrategy
 
-        class _BTStrategy:
-            name = self.name
+        # Capture self reference for use inside nested class methods
+        _outer = self
+        strat_name = f"{_outer.name}_BT"
 
-            def __init__(self, engine) -> None:
-                # Pre-compute signals over the full bar dataframe
-                full_df = pd.DataFrame(
-                    {c: self.data[c] for c in ("Open", "High", "Low", "Close", "Volume")}
-                    if hasattr(engine, "_symbol") else {}
-                )
-                full_df.index = range(len(self.Close))
-                self._sig = self.generate_signals(full_df).astype(int)
+        class _BTStrategy(BtStrategy):
+            name = strat_name
 
-            @property
-            def Close(self):
-                return self.data["Close"]
+            def init(self):
+                # Build full OHLCV DataFrame at init time for signal pre-computation
+                close = list(self.data["Close"])
+                high = list(self.data["High"])
+                low = list(self.data["Low"])
+                open_p = list(self.data["Open"])
+                volume = list(self.data["Volume"])
 
-            @property
-            def High(self):
-                return self.data["High"]
+                df = pd.DataFrame({
+                    "Close": close, "Open": open_p, "High": high,
+                    "Low": low, "Volume": volume,
+                })
 
-            @property
-            def Low(self):
-                return self.data["Low"]
+                sigs = _outer.generate_signals(df).fillna(0).astype(int).tolist()
+                self._signal_list = sigs
+                self._counter = 0
 
-            @property
-            def Open(self):
-                return self.data["Open"]
-
-            @property
-            def Volume(self):
-                return self.data["Volume"]
-
-            @property
-            def position(self):
-                return self.position
-
-            def next(self) -> None:
-                idx = len(self) - 1
-                sig = self._sig.iloc[idx] if idx < len(self._sig) else 0
-                if sig == 1 and not self.position:
+            def next(self):
+                """Execute one-bar trading decision based on pre-computed signal."""
+                idx = self._counter
+                self._counter += 1
+                if idx >= len(self._signal_list):
+                    return
+                sig = self._signal_list[idx]
+                has_position = self.position.size > 0
+                if sig == 1 and not has_position:
                     self.buy()
-                elif sig == -1 and self.position:
-                    self.close()
+                elif sig == -1 and has_position:
+                    self.sell()
 
         return _BTStrategy
 
@@ -122,7 +115,9 @@ class EmaCrossRsi(Strategy):
         signal[cross_down | rsi_overbought] = -1
 
         # Prevent immediate re-entry on same bar as exit
-        signal[signal == 1] &= ~signal.shift(1).fillna(1).eq(-1)
+        prev_was_exit = signal.shift(1).fillna(1).eq(-1)
+        mask = (signal == 1) & ~prev_was_exit
+        signal[mask] = 1
 
         return signal
 

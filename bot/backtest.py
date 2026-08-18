@@ -31,18 +31,22 @@ def run_backtest(
 
     # Import strategy plugin from registry
     from bot.core import DATASOURCES, STRATEGIES
+    from bot.core.plugins import discover_all
+    discover_all()
+    # Get strategy instance from plugin registry (plugins register instances via `plugin = ...`)
     try:
-        strategy_cls = STRATEGIES.get(strategy_name)
+        strategy_obj = STRATEGIES.get(strategy_name)
     except KeyError:
         available = STRATEGIES.names()
         logger.error(f"Unknown strategy '{strategy_name}'. Available: {available}")
         raise ValueError(f"Strategy '{strategy_name}' not found. Available: {', '.join(available)}")
 
-    # Create strategy instance with params
+    # Merge default params with any overrides, then create fresh instance
     if strategy_params is None:
         strategy_params = {}
-    params = {**strategy_cls.params, **strategy_params}
-    strategy_instance = strategy_cls(**params)
+    defaults = getattr(strategy_obj, "params", {})
+    merged_params = {**defaults, **strategy_params}
+    strategy_instance = type(strategy_obj)(**merged_params)
 
     bt_class = strategy_instance.to_backtesting_strategy()
 
@@ -66,15 +70,15 @@ def run_backtest(
                 "total_return_pct": round(float(stats["Return [%]"]), 2),
                 "buy_hold_pct": round(float(stats["Buy & Hold Return [%]"]), 2),
                 "sharpe_ratio": round(float(stats.get("Sharpe Ratio", 0)), 4),
-                "max_dd_pct": round(float(stats["Max Drawdown [%]"]), 2),
+                "max_dd_pct": round(float(stats["Max. Drawdown [%]"]), 2),
                 "trades": int(stats["# Trades"]),
                 "win_rate_pct": round(float(stats.get("Win Rate [%]", 0)), 1),
             }
 
             # Get trades dataframe
-            trades = bt.trades()
-            if not trades.empty:
-                trades["pnl"] = round(trades["pnl"], 2)
+            trades_df = stats.get("_trades", pd.DataFrame())
+            if not trades_df.empty:
+                trades_df["PnL"] = round(trades_df["PnL"], 2)
                 trades["return_pct"] = round(trades["return_pct"] * 100, 2)
 
             # Save HTML report
@@ -83,8 +87,8 @@ def run_backtest(
 
             results[sym] = {
                 "metrics": metrics,
-                "trades_df": trades if not trades.empty else pd.DataFrame(),
-                "equity_curve": bt.equity_curve,
+                "trades_df": trades_df if not trades_df.empty else pd.DataFrame(),
+                "equity_curve": stats.get("_equity_curve", pd.DataFrame()).reset_index(drop=True),
             }
             logger.info(f"Backtest {sym}: {metrics['total_return_pct']}% return, {metrics['trades']} trades")
 

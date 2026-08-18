@@ -5,7 +5,6 @@ persists fetched posts to CSV cache for repeat access.
 """
 
 import csv
-import pandas as pd
 import hashlib
 import logging
 from datetime import datetime, timedelta
@@ -16,11 +15,11 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 try:
-    from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
-    _analyzer = None  # lazy init per engine instance
+    from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer as _SIA
+    _VADER_AVAILABLE = True
 except ImportError:
-    _analyzer = None
-    logger.warning("vaderSentiment not available — sentiment scoring disabled.")
+    _VADER_AVAILABLE = False
+    logger.warning("vaderSentiment not installed — scoring disabled.")
 
 
 @dataclass
@@ -48,15 +47,12 @@ class SentimentScore:
 class SentimentEngine:
     """Fetches and scores social-sentiment from registered sources."""
 
-    def __init__(self) -> None:
-        if _analyzer is not None:
-            self._analyzer = SentimentIntensityAnalyzer()
-        else:
-            self._analyzer = None
+    def __init__(self):
+        self._analyzer = _SIA() if _VADER_AVAILABLE else None
 
     def _score_text(self, text: str) -> float:
         """Compute VADER compound score for text."""
-        if self._analyzer is None:
+        if not _VADER_AVAILABLE or self._analyzer is None:
             return 0.0
         return self._analyzer.polarity_scores(text)["compound"]
 
@@ -81,7 +77,7 @@ class SentimentEngine:
                 ))
             return scored
         except Exception as exc:
-            logger.warning(f"Sentiment source '{source_plugin.name}' failed for {symbol}: {exc}")
+            logger.warning("Sentiment source '%s' failed for %s: %s", source_plugin.name, symbol, exc)
             return []
 
     def save_posts(self, symbol: str, posts: list[SentimentPost]) -> None:
@@ -96,10 +92,6 @@ class SentimentEngine:
             writer = csv.DictWriter(f, fieldnames=headers)
             if write_header:
                 writer.writeheader()
-            existing_hashes = set()
-            if f.tell() > 0:  # file has content
-                # Read existing hashes to avoid duplicates
-                pass  # simplified — just append
 
             for post in posts:
                 text_hash = hashlib.sha256(post.text.encode()).hexdigest()[:12]

@@ -1175,6 +1175,127 @@ def note(text):
 # ENTRY POINT
 # ════════════════════════════════════════════════════════════════════
 
+from pathlib import Path
+import json as _json
+
+
+@mcp.tool()
+def portfolio_rebalance(symbol=None, target_pct=0.25, symbols=None):
+    """Rebalance a symbol's position to target portfolio percentage."""
+    from bot.core.plugins import discover_all
+    from bot.data import fetch_history
+    from bot.broker import MockBroker
+    import asyncio
+
+    discover_all()
+    broker = MockBroker()
+
+    syms = symbols or ["AAPL", "MSFT", "NVDA"]
+    total_equity = asyncio.run(broker.get_equity())
+    target_value = total_equity * target_pct
+
+    try:
+        df = fetch_history(syms[0], "-90d", interval="1d")
+        last_price = float(df["Close"].iloc[-1])
+    except Exception:
+        return json.dumps({"error": "Could not fetch price data"})
+
+    current_qty = broker.positions.get(symbol or syms[0], 0)
+    diff_value = target_value - (current_qty * last_price)
+    qty_to_trade = int(diff_value / last_price)
+
+    direction = "BUY" if qty_to_trade > 0 else "SELL"
+    qty = abs(qty_to_trade)
+
+    order_id = asyncio.run(broker.submit_order(symbol or syms[0], qty, direction))
+    new_qty = max(0, current_qty + (qty_to_trade if direction == "BUY" else -qty_to_trade))
+
+    return json.dumps({
+        "symbol": symbol or syms[0],
+        "action": direction, "quantity": qty,
+        "target_pct": target_pct,
+        "current_qty": current_qty, "new_qty": new_qty,
+        "total_equity": round(total_equity, 2),
+        "order_id": order_id,
+    }, indent=2)
+
+
+@mcp.tool()
+def adjust_stop_loss(symbol, new_stop_price):
+    """Adjust stop-loss level for an existing tracked position."""
+    position_file = Path("logs/positions_state.json")
+
+    if not position_file.exists():
+        return json.dumps({"error": "No positions file found — run engine first"})
+
+    try:
+        positions = json.loads(position_file.read_text())
+    except Exception:
+        return json.dumps({"error": "Could not read positions file"})
+
+    if symbol in positions:
+        positions[symbol]["stop"] = new_stop_price
+        position_file.write_text(json.dumps(positions, indent=2))
+        return json.dumps({"success": True, "symbol": symbol, "new_stop": new_stop_price})
+    else:
+        return json.dumps({"success": False, "open_positions": list(positions.keys())})
+
+
+@mcp.tool()
+def manage_watchlist(action="list", symbol=None):
+    """Manage symbol watchlists stored in logs/watchlist.json."""
+    wl_path = Path("logs/watchlist.json")
+    try:
+        wl = json.loads(wl_path.read_text()) if wl_path.exists() else {"name": "default", "symbols": []}
+    except Exception:
+        wl = {"name": "default", "symbols": []}
+
+    if action == "add":
+        if not symbol:
+            return json.dumps({"error": "Symbol required"})
+        upper = symbol.upper()
+        if upper not in wl["symbols"]:
+            wl["symbols"].append(upper)
+            wl_path.write_text(json.dumps(wl, indent=2))
+            return json.dumps({"added": upper, "total": len(wl["symbols"])})
+        return json.dumps({"message": f"{upper} already in watchlist"})
+
+    elif action == "remove":
+        if symbol and symbol.upper() in wl["symbols"]:
+            wl["symbols"].remove(symbol.upper())
+            wl_path.write_text(json.dumps(wl, indent=2))
+            return json.dumps({"removed": symbol.upper(), "total": len(wl["symbols"])})
+        return json.dumps({"message": f"{symbol} not found"})
+
+    elif action == "clear":
+        wl["symbols"] = []
+        wl_path.write_text(json.dumps(wl, indent=2))
+        return json.dumps({"cleared": True})
+
+    return json.dumps({"watchlist": wl}, indent=2)
+
+
+@mcp.tool()
+def signal_log_viewer(count=50, symbol=None, side=None):
+    """View recent trading signals/orders from trades.csv log file."""
+    import pandas as pd
+
+    trades_path = Path("logs/trades.csv")
+    if not trades_path.exists() or trades_path.stat().st_size == 0:
+        return json.dumps({"signals": [], "count": 0, "message": "No trade log yet — start engine or backtest"})
+
+    try:
+        all_df = pd.read_csv(trades_path)
+        df = all_df.copy()
+        if symbol:
+            df = df[df["symbol"].str.upper() == symbol.upper()]
+        if side:
+            df = df[df["side"].str.upper() == side.upper()]
+        df = df.tail(count).reset_index(drop=True)
+        records = df.to_dict(orient="records")
+        return json.dumps({"signals": records, "count": len(records), "total_in_log": len(all_df)}, default=str, indent=2)
+    except Exception as e:
+        return json.dumps({"error": str(e)})
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
