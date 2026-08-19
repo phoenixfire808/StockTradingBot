@@ -11,6 +11,7 @@ Exposes:
 """
 
 import logging
+import math
 from datetime import datetime, timedelta, timezone
 from itertools import product
 from typing import Any
@@ -474,3 +475,276 @@ def walk_forward_optimize(
         "param_grid": param_grid,
         "symbols": symbols,
     }
+
+
+# ────────────────────────────────────────────────────────── NEW FEATURES
+# Enhanced scoring, overlapping windows, expanded param grids
+# ──────────────────────────────────────────────────────────
+
+def _compute_sortino_ratio(returns: pd.Series, rf: float = 0.0, periods_per_year: int = 252) -> float | None:
+    """Compute annualised Sortino ratio from a Series of periodic returns.
+
+    Falls back to *None* when daily returns contain fewer than 30 observations
+    or when downside deviation is zero / NaN.
+    """
+    if len(returns) < 30:
+        return None
+
+    excess = returns - rf / periods_per_year
+    downside = excess[excess < 0].dropna()
+
+    if len(downside) == 0:
+        return None
+
+    downside_std = downside.std(ddof=1)
+    if math.isnan(downside_std) or downside_std == 0.0:
+        return None
+
+    mean_excess = excess.mean()
+    ann_factor = math.sqrt(periods_per_year)
+    sortino = (mean_excess / downside_std) * ann_factor
+
+    if math.isnan(sortino):
+        return None
+
+    return round(float(sortino), 4)
+
+
+def _agg_returns_from_metrics(metrics: dict[str, Any]) -> pd.Series:
+    """Try to build a Series of daily returns from backtest *metrics*.
+
+    Returns an empty Series when equity_curve is not available.
+    """
+    eq = metrics.get("equity_curve")
+    if eq is None:
+        # Could be a plain list of floats
+        if isinstance(metrics.get("equity_curve"), list):
+            eq_list = metrics["equity_curve"]
+        else:
+            eq_list = []
+    elif hasattr(eq, "tolist"):
+        eq_list = eq.tolist()
+    else:
+        eq_list = []
+
+    if len(eq_list) < 2:
+        return pd.Series(dtype=float)
+
+    vals = [float(v) for v in eq_list]
+    return pd.Series(vals).pct_change().dropna()
+
+
+def enhanced_scoring(
+    metrics_dict: dict[str, Any],
+    sharpe_weight: float = 10,
+    sortino_weight: float = 5,
+    dd_penalty_weight: float = 20,
+) -> float:
+    """Weighted scoring function combining Sharpe, Sortino, and drawdown penalty.
+
+    score = sharpe_weight * sharpe
+          + sortino_weight   * sortino   (or 0 if unavailable)
+          - dd_penalty_weight * abs(max_dd_pct)
+
+    If both Sharpe and Sortino are missing or zero, falls back to total_return_pct
+    so that loss-making configurations still rank above catastrophic ones.
+
+    Args:
+        metrics_dict:        Backtest result dict (same shape produced by ``_score_backtest``).
+        sharpe_weight:       Multiplier for Sharpe ratio (default 10).
+        sortino_weight:      Multiplier for Sortino ratio (default 5).
+        dd_penalty_weight:   Multiplier applied to absolute max drawdown pct (default 20).
+
+    Returns:
+        Weighted score -- always >= 0.0 (clamped at zero floor).
+    """
+    sharpe = metrics_dict.get("sharpe_ratio", 0)
+    try:
+        sharpe = float(sharpe) if sharpe is not None else 0.0
+    except (TypeError, ValueError):
+        sharpe = 0.0
+
+    # Sortino – compute from equity curve if present; otherwise read pre-computed key
+    sortino = metrics_dict.get("sortino_ratio")
+    if sortino is None:
+        ret_series = _agg_returns_from_metrics(metrics_dict)
+        if not ret_series.empty:
+            sortino = _compute_sortino_ratio(ret_series)
+    try:
+        sortino = float(sortino) if sortino is not None else 0.0
+    except (TypeError, ValueError):
+        sortino = 0.0
+
+    max_dd = metrics_dict.get("max_dd_pct", 0)
+    try:
+        max_dd = float(abs(max_dd)) if max_dd is not None else 0.0
+    except (TypeError, ValueError):
+        max_dd = 0.0
+
+    score = sharpe_weight * sharpe + sortino_weight * sortino - dd_penalty_weight * max_dd
+
+    return float(round(max(score, 0.0), 4))
+
+
+def generate_overlapping_windows(
+    start: str,
+    end: str | None,
+    train_window: int,
+    test_window: int,
+    step_size: int | None = None,
+) -> list[dict[str, str]]:
+    """Generate rolling train/test date windows **with configurable overlap**.
+
+    Unlike ``_generate_windows`` (which steps forward by exactly *test_window*,
+    producing consecutive non-overlapping segments), this function advances by
+    *step_size* days between folds, allowing test periods to overlap across
+    folds when *step_size* < *test_window*.
+
+    This provides finer granularity during optimisation: more folds → better
+    averaging over market regimes, at the cost of additional backtests.
+
+    Args:
+        start:           Start date ("YYYY-MM-DD").
+        end:             End date ("YYYY-MM-DD"); None = today UTC.
+        train_window:    Training window length in **days**.
+        test_window:     Test window length in **days**.
+        step_size:       Days to advance between fold starts.
+                         Defaults to ``test_window // 2`` (50 % overlap).
+
+    Returns:
+        List of dicts with keys ``train_start``, ``train_end``,
+        ``test_start``, ``test_end``.
+
+    Example::
+
+        # 90-day train, 30-day test, step 15 days => 50% overlap
+        windows = generate_overlapping_windows("2020-01-01", "2024-01-01",
+                                               90, 30, step_size=15)
+    """
+    start_dt = datetime.strptime(start, "%Y-%m-%d")
+    if end:
+        end_dt = datetime.strptime(end, "%Y-%m-%d")
+    else:
+        end_dt = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+
+    if step_size is None:
+        step_size = max(test_window // 2, 1)
+
+    windows: list[dict[str, str]] = []
+    cursor = start_dt
+
+    while cursor + timedelta(days=train_window + test_window) <= end_dt:
+        train_start = cursor
+        train_end = cursor + timedelta(days=train_window)
+        test_start = train_end
+        test_end = test_start + timedelta(days=test_window)
+
+        windows.append({
+            "train_start": train_start.strftime("%Y-%m-%d"),
+            "train_end": train_end.strftime("%Y-%m-%d"),
+            "test_start": test_start.strftime("%Y-%m-%d"),
+            "test_end": test_end.strftime("%Y-%m-%d"),
+        })
+        cursor = cursor + timedelta(days=step_size)
+
+    logger.info(
+        "Generated %d overlapping walk-forward windows "
+        "(train=%dd, test=%dd, step=%dd, range=%s → %s)",
+        len(windows),
+        train_window,
+        test_window,
+        step_size,
+        start,
+        end or "now",
+    )
+    return windows
+
+
+# ──────────────────────────────────────────────────────────
+# Expanded DEFAULT_PARAM_GRIDS — covers all known strategies
+# ──────────────────────────────────────────────────────────
+
+from typing import Literal
+
+StrategyGrid = Literal[
+    "ema_cross_rsi",
+    "mean_reversion_rsi",
+    "mean_reversion_rsi2",
+    "turtle_breakout",
+    "bollinger_reversion",
+    "vwap_breakout",
+    "momentum_scanner",
+    "ml_hybrid",
+]
+
+EXPANDED_DEFAULT_PARAM_GRIDS: dict[str, dict[str, list]] = {
+    # EMA-Cross-RSI: fast/slow crossover + RSI filter
+    "ema_cross_rsi": {
+        "fast": [5, 8, 9, 13, 21],
+        "slow": [13, 21, 34, 50, 55],
+        "rsi_period": [10, 14, 21],
+        "rsi_entry_max": [60.0, 65.0, 70.0, 75.0],
+        "rsi_exit": [65.0, 70.0, 75.0, 80.0],
+    },
+    # Mean-Reversion RSI: smoothed RSI crossings + volume filter
+    "mean_reversion_rsi": {
+        "rsi_period": [7, 10, 14, 21],
+        "entry_threshold": [20.0, 25.0, 30.0, 35.0],
+        "exit_threshold": [60.0, 65.0, 70.0, 75.0],
+        "signal_period": [5, 9, 14],
+        "volume_filter": [True, False],
+        "volume_ma_period": [10, 20, 30],
+    },
+    # Mean-Reversion RSI-2: ultra-short RSO + BB filter
+    "mean_reversion_rsi2": {
+        "rsi_period": [2, 3],
+        "rsi_oversold": [5.0, 8.0, 10.0, 15.0],
+        "rsi_overbought": [70.0, 80.0, 90.0],
+        "bb_period": [10, 15, 20],
+        "bb_std": [1.5, 2.0, 2.5],
+    },
+    # Turtle Breakout: Donchian channel + ATR sizing
+    "turtle_breakout": {
+        "enter_period": [10, 15, 20, 23, 55],
+        "exit_period": [5, 7, 10],
+        "atr_period": [7, 10, 14, 20],
+        "risk_pct": [0.5, 1.0, 1.5, 2.0, 3.0],
+        "units_per_risk_step": [0.5, 1.0, 1.5],
+    },
+    # Bollinger Reversion: price near lower BB + RSO oversold
+    "bollinger_reversion": {
+        "bb_period": [10, 15, 20, 25, 30],
+        "bb_std": [1.0, 1.5, 2.0, 2.5],
+        "rso_period": [7, 14, 21],
+        "rso_oversold": [15.0, 20.0, 25.0],
+        "rso_overbought": [70.0, 75.0, 80.0, 85.0],
+        "atr_stop_mult": [1.5, 2.0, 2.5, 3.0],
+        "atr_tp_mult": [2.0, 3.0, 4.0],
+    },
+    # VWAP Breakout: price above VWAP + volume confirmation
+    "vwap_breakout": {
+        "vwap_period": [10, 15, 20, 30],
+        "vol_surge_mult": [1.2, 1.5, 2.0],
+        "stop_multiplier": [1.5, 2.0, 2.5, 3.0],
+        "tp_multiplier": [2.0, 3.0, 4.0],
+        "min_volume_ratio": [1.0, 1.2, 1.5],
+    },
+    # Momentum Scanner: MACD cross + volume surge + trend MA
+    "momentum_scanner": {
+        "macd_fast": [8, 10, 12],
+        "macd_slow": [21, 26],
+        "macd_signal": [5, 7, 9],
+        "vol_ma_period": [10, 15, 20],
+        "vol_surge_mult": [1.3, 1.5, 2.0],
+        "trend_ma_period": [20, 30, 50, 100],
+    },
+    # ML Hybrid: features + model config sweep
+    "ml_hybrid": {
+        "ml_model": ["logistic_regression", "random_forest", "xgboost"],
+        "feature_set": ["all", "ta_only", "sentiment_only"],
+        "rebalance_freq": ["daily", "weekly"],
+        "kelly_fraction": [0.25, 0.5, 1.0],
+        "lookback_days": [60, 90, 120],
+        "prediction_horizon": [1, 3, 5],
+    },
+}

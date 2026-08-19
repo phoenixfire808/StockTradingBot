@@ -23,6 +23,17 @@
       }
     },
     {
+      "name": "mean_reversion_rsi",
+      "params": {
+        "rsi_period": 14,
+        "entry_threshold": 30.0,
+        "exit_threshold": 70.0,
+        "signal_period": 9,
+        "volume_filter": true,
+        "volume_ma_period": 20
+      }
+    },
+    {
       "name": "mean_reversion_rsi2",
       "params": {
         "rsi_period": 2,
@@ -91,7 +102,10 @@
         "slow": 21,
         "rsi_period": 14,
         "rsi_entry_max": 70.0,
-        "rsi_exit": 75.0
+        "rsi_exit": 75.0,
+        "multi_timeframe": true,
+        "vol_adjusted": false,
+        "vol_lookback": 20
       }
     },
     {
@@ -121,6 +135,18 @@
         "sentiment_threshold": 0.15,
         "block_bearish": true,
         "boost_bullish": true
+      }
+    },
+    {
+      "name": "turtle_breakout",
+      "params": {
+        "enter_period": 20,
+        "exit_period": 10,
+        "atr_period": 20,
+        "risk_pct": 0.02,
+        "unit_risk_pct": 0.01,
+        "stop_multiplier": 0.5,
+        "pyramiding": 3
       }
     },
     {
@@ -164,6 +190,6 @@
       "name": "stocktwits"
     }
   ],
-  "last_updated": "2026-08-19T00:39:30.261081+00:00",
+  "last_updated": "2026-08-19T03:36:53.697032+00:00",
   "version": 1
 }

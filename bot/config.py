@@ -42,6 +42,36 @@ class Settings:
     # Multi-strategy allocation JSON string
     strategy_allocations: str = ""
 
+    # Trade amount guidelines (siropkin/robinhood-ai-trading-bot pattern)
+    min_buying_amount_usd: float = 1.0
+    max_buying_amount_usd: float = 10_000.0
+    min_selling_amount_usd: float = 1.0
+    max_selling_amount_usd: float = 50_000.0
+
+    # Symbol exclusions - signals/trades filtered for these symbols
+    symbol_exclusions: list[str] = field(default_factory=list)
+
+    # Blacklist/whitelist pair management (-inspired)
+    symbol_whitelist: list[str] = field(default_factory=list)  # Empty = trade anything; non-empty = only these symbols
+    blacklisted_symbols: list[str] = field(default_factory=lambda: _parse_list(_get("BLACKLISTED_SYMBOLS", "GOOGL,TSLA")))
+
+    # Stop-loss / take-profit management (-inspired patterns)
+    stop_loss_pct: float = 0.05           # Default fixed stop-loss % below entry (5%)
+    trailing_stop_enabled: bool = True     # Enable/disable trailing stops
+    trailing_stop_pct: float = 0.03        # Trailing distance % below highest price
+    trailing_stop_positive_offset: float = 0.05  # Profit threshold before trailing kicks in
+    max_hold_minutes: int = 1440           # Max hold time (24h default), 0 = unlimited
+    roi_exit_enabled: bool = True          # Enable ROI-based tiered exits
+    roi_exit_table: str = ''               # -style ROI table JSON: {"10": 0, "5": 60, "0": 1440}
+
+    # Kelly Criterion parameters (feature-flagged off-by-default)
+    kelly_enabled: bool = False
+    kelly_method: str = "returns"        # "returns" | "winrate_payoff" | "disabled"
+    kelly_fractional: float = 0.25       # Quarter-Kelly default (industry standard)
+    kelly_max_fraction: float = 0.50     # Hard cap prevents overbetting
+    kelly_min_samples: int = 30          # Min trades before using Kelly estimate
+    kelly_track_returns_window: int = 90 # Rolling window length for returns-based Kelly
+
     @property
     def auth_mode(self) -> str | None:
         if self.robinhood_mcp_command:
@@ -65,6 +95,17 @@ class Settings:
         except (json.JSONDecodeError, TypeError) as exc:
             logger.warning("Failed to parse STRATEGY_ALLOCATIONS_JSON: %s", exc)
             return {}
+
+    def is_symbol_allowed(self, symbol: str) -> bool:
+        """Return True if *symbol* passes whitelist and blacklist checks."""
+        sym = symbol.strip().upper()
+        # Blacklist always wins
+        if sym in [s.upper() for s in self.blacklisted_symbols]:
+            return False
+        # Whitelist gate - empty means open market
+        if self.symbol_whitelist and sym not in [s.upper() for s in self.symbol_whitelist]:
+            return False
+        return True
 
 
 def _get(key: str, default: str = "") -> str:
@@ -97,6 +138,19 @@ def load_settings() -> Settings:
         sentiment_lookback_hours=int(_get("SENTIMENT_LOOKBACK_HOURS", "24")),
         log_level=_get("LOG_LEVEL", "DEBUG"),
         strategy_allocations=_get("STRATEGY_ALLOCATIONS_JSON", ""),
+        min_buying_amount_usd=float(_get("MIN_BUYING_AMOUNT_USD", "1.0")),
+        max_buying_amount_usd=float(_get("MAX_BUYING_AMOUNT_USD", "10000.0")),
+        min_selling_amount_usd=float(_get("MIN_SELLING_AMOUNT_USD", "1.0")),
+        max_selling_amount_usd=float(_get("MAX_SELLING_AMOUNT_USD", "50000.0")),
+        symbol_exclusions=[s.strip() for s in _get("SYMBOL_EXCLUSIONS", "").split(",") if s.strip()],
+        symbol_whitelist=_parse_list(_get("SYMBOL_WHITELIST", "")),
+        blacklisted_symbols=[s.strip() for s in _get("BLACKLISTED_SYMBOLS", "GOOGL,TSLA").split(",") if s.strip()],
+        kelly_enabled=_get("KELLY_ENABLED", "false").lower() == "true",
+        kelly_method=_get("KELLY_METHOD", "returns"),
+        kelly_fractional=float(_get("KELLY_FRACTIONAL", "0.25")),
+        kelly_max_fraction=float(_get("KELLY_MAX_FRACTION", "0.50")),
+        kelly_min_samples=int(_get("KELLY_MIN_SAMPLES", "30")),
+        kelly_track_returns_window=int(_get("KELLY_TRACK_RETURNS_WINDOW", "90")),
     )
 
 
