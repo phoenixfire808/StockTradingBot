@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -63,7 +63,7 @@ class YFinanceCryptoSource:
         rel_match = re.match(r"-(\d+)D", str(start))
         if rel_match:
             days = int(rel_match.group(1))
-            start = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d")
+            start = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
 
         df = yf.download(ticker, start=start, end=end, interval=interval, auto_adjust=True, progress=False)
         if df is None or df.empty:

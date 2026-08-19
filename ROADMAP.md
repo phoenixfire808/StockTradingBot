@@ -17,7 +17,6 @@
 - [x] **P12** Multi-strategy portfolio allocation with Kelly criterion weighting — `bot/portfolio.py` (Kelly / equal-weight / risk-parity allocators)
 - [x] **P13** Sentiment-filtered strategy — `bot/plugins/strategies/sentiment_filtered.py`
 - [x] **P14** Walk-forward optimization — `bot/optimization.py` + MCP `walk_forward_optimize`
-- [~] **P15** Per-strategy equity tracking & portfolio allocation dashboard — `bot/equity_tracker.py` + Streamlit `Portfolio` page shipped; pie chart, Kelly fractions, risk-parity breakdown. **Partial**: dashboard links to `logs/equity_by_strategy.json` written by manual/optional path; auto-feeding the snapshot every engine cycle still being wired.
 - [x] **P16** Options trading support — `OptionOrder` / `OptionChain` dataclasses + `submit_option_order` / `get_option_chain` in `bot/broker.py`; re-exported via `bot/options.py`
 - [x] **P17** Crypto trading support — `CryptoOrder` / `CryptoQuote` + `submit_crypto_order` / `get_crypto_quotes` in `bot/broker.py`; yfinance crypto datasource `bot/plugins/datasources/yfinance_crypto.py`
 - [x] **P19** Discord / email alerts on fills, kill-switch events, large drawdowns — `bot/alerts.py`
@@ -30,10 +29,13 @@
 - [x] **P25** Out-of-sample validation gate — `bot/ml/validation.py` (walk-forward / hold-out check before deploy)
 - [x] **P28** Multi-timeframe analysis — `bot/multi_timeframe.py` + `bot/plugins/strategies/multi_timeframe.py`
 - [x] **P29** Sector rotation detection — `bot/sector_rotation.py` + `bot/plugins/strategies/sector_rotation.py`
+- [x] **P25b** ML-driven strategy plugins — `bot/plugins/strategies/ml_hybrid.py` (gradient-boosted signal + technicals) and `ml_signal_filter.py` (ML confidence gates a base strategy) + tests `test_ml_hybrid_strategy.py` / `test_ml_signal_strategy.py`
+- [x] **P25c** Dry-run CLI overrides — `bot/engine.py` `--symbols` and `--duration` flags now bypass config defaults; covered by `tests/test_dry_run_symbols.py` and `tests/test_dry_run_duration.py`
 
 ## In Progress
 
-- [~] **P15** (carry-over from Completed list — see partial note above)
+
+- [~] **P15** Per-strategy equity tracking & portfolio allocation dashboard — `bot/equity_tracker.py` + Streamlit `Portfolio` page shipped; pie chart, Kelly fractions, risk-parity breakdown. **Partial**: dashboard links to `logs/equity_by_strategy.json` written by manual/optional path; auto-feeding the snapshot every engine cycle still being wired.
 
 _Next session priorities below. P18 / P26 / P27 still pending._
 

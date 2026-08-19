@@ -1,7 +1,7 @@
 """YFinance datasource plugin — free OHLCV via yahoo finance API."""
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +42,7 @@ class YFinanceSource:
         rel_match = re.match(r"-(\d+)D", str(start))
         if rel_match:
             days = int(rel_match.group(1))
-            start_dt = datetime.utcnow().replace(microsecond=0)
+            start_dt = datetime.now(timezone.utc).replace(microsecond=0)
             start = (start_dt.replace(hour=9, minute=30, second=0) - __import__('datetime').timedelta(days=days)).strftime('%Y-%m-%d')
 
         df = yf.download(symbol, start=start, end=end, interval=interval, auto_adjust=True, progress=False)

@@ -14,12 +14,12 @@ import json
 import logging
 import os
 import signal
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from bot.trade_store import TradeStore, sqlite_enabled
-
 logger = logging.getLogger(__name__)
 
 
@@ -138,13 +138,42 @@ class EngineState:
             json.dump(positions, f, indent=2)
 
 
-def run_engine(broker, settings, strategy_name="ema_cross_rsi", strategy_params=None) -> None:
-    """Main live trading loop via APScheduler. Manages entire Agentic account."""
+def run_engine(broker, settings, strategy_name="ema_cross_rsi", strategy_params=None, duration_seconds: int | None = None, symbols: list[str] | None = None) -> None:
+    """Main live trading loop via APScheduler. Manages entire Agentic account.
+
+    If ``duration_seconds`` is provided, the engine schedules a daemon
+    ``threading.Timer`` that calls ``scheduler.shutdown(wait=False)`` after
+    the given number of seconds. ``None`` (the default) preserves the
+    legacy "run forever" behavior used by the ``live`` command.
+
+    The ``symbols`` parameter (when provided) overrides the symbol set used by
+    the trading loop. When omitted, the engine falls back to the symbol list
+    stored in the confirmation file (``logs/strategy_confirmed.json``), and
+    finally to ``settings.symbols``. This guarantees that
+    ``python main.py dry-run --symbols AAPL`` actually monitors only AAPL
+    instead of the configured default.
+    """
     from apscheduler.schedulers.blocking import BlockingScheduler
     from bot.broker import MockBroker
 
     scheduler = BlockingScheduler()
     engine_state = EngineState()
+
+    # Optional duration shutdown — fired from a separate thread so the
+    # main thread's ``scheduler.start()`` returns cleanly when the timer pops.
+    duration_timer: threading.Timer | None = None
+    if duration_seconds is not None:
+        def _duration_shutdown():
+            logger.info("Duration limit (%ss) reached — shutting down engine", duration_seconds)
+            try:
+                scheduler.shutdown(wait=False)
+            except Exception as exc:
+                logger.warning("Scheduler shutdown during duration limit failed: %s", exc)
+
+        duration_timer = threading.Timer(duration_seconds, _duration_shutdown)
+        duration_timer.daemon = True
+        duration_timer.start()
+        logger.info("Engine will auto-stop after %s seconds", duration_seconds)
 
     # Confirm strategy before starting
     confirmed = engine_state.read_strategy_confirmation()
@@ -153,6 +182,18 @@ def run_engine(broker, settings, strategy_name="ema_cross_rsi", strategy_params=
         return
 
     effective_params = {**confirmed.get("params", {}), **(strategy_params or {})}
+
+    # Resolve the active symbol set with explicit precedence:
+    #   1. caller-supplied ``symbols`` argument
+    #   2. symbols stored in the confirmation file
+    #   3. configured ``settings.symbols`` fallback
+    confirmed_symbols = confirmed.get("symbols")
+    if symbols is not None:
+        active_symbols = list(symbols)
+    elif confirmed_symbols:
+        active_symbols = list(confirmed_symbols)
+    else:
+        active_symbols = list(settings.symbols)
 
     # Import strategy
     from bot.core import STRATEGIES
@@ -163,7 +204,7 @@ def run_engine(broker, settings, strategy_name="ema_cross_rsi", strategy_params=
         return
 
     strategy_instance = type(strategy_cls)(**effective_params)
-    logger.info("Engine started: strategy=%s params=%s symbols=%s", strategy_name, effective_params, settings.symbols)
+    logger.info("Engine started: strategy=%s params=%s symbols=%s", strategy_name, effective_params, active_symbols)
 
     # Risk management
     from bot.risk import KillSwitch
@@ -208,19 +249,11 @@ def run_engine(broker, settings, strategy_name="ema_cross_rsi", strategy_params=
 
     async def _cycle():
         nonlocal last_equity, cycle_counter, prev_day, has_rebalanced_today
-
-        now_str = datetime.utcnow().isoformat()
-        now_dt = datetime.utcnow()
+        now_str = datetime.now(timezone.utc).isoformat()
+        now_dt = datetime.now(timezone.utc)
         current_day = now_dt.strftime("%Y-%m-%d")
         cycle_counter[0] += 1
 
-        # Step 1: Check if market is open (unless mock)
-        if not isinstance(broker, MockBroker):
-            if not broker.is_market_open():
-                logger.debug("Market closed, skipping cycle %d", cycle_counter[0])
-                return
-
-        # Read current equity
         try:
             equity = await broker.get_equity()
             last_equity = equity
@@ -245,17 +278,6 @@ def run_engine(broker, settings, strategy_name="ema_cross_rsi", strategy_params=
             kill_switch_alerted[0] = False
             drawdown_alerted_pct[0] = 0.0
             logger.info("New trading day %s — alerts re-armed", current_day)
-
-        # Compute intra-day drawdown for advisory alert (before kill-switch)
-        if kill_switch_mgr.day_start_equity and kill_switch_mgr.day_start_equity != 0:
-            _dd_pct = ((kill_switch_mgr.day_start_equity - equity)
-                       / kill_switch_mgr.day_start_equity) * 100
-            _alert_thresh = alerts.config.drawdown_alert_pct
-            if _dd_pct >= _alert_thresh and _dd_pct > drawdown_alerted_pct[0]:
-                alerts.send_drawdown_alert(_dd_pct, equity=equity)
-                drawdown_alerted_pct[0] = _dd_pct
-
-        # Check kill switch
         is_killed = kill_switch_mgr.check(equity)
         if is_killed:
             logger.warning("Kill switch active — skipping trading this cycle")
@@ -304,7 +326,7 @@ def run_engine(broker, settings, strategy_name="ema_cross_rsi", strategy_params=
 
         # Step 3: Manage exits for each position
         for sym, pos in list(internal_pos.items()):
-            if sym not in settings.symbols:
+            if sym not in active_symbols:
                 continue
 
             try:
@@ -339,7 +361,7 @@ def run_engine(broker, settings, strategy_name="ema_cross_rsi", strategy_params=
 
         # Update entry prices for newly adopted positions
         if any(p.get("entry_price", 0) == 0 for p in internal_pos.values()):
-            tracked = [s for s in settings.symbols if s in internal_pos]
+            tracked = [s for s in active_symbols if s in internal_pos]
             if tracked:
                 try:
                     quotes_result = await broker.get_quotes(tracked)
@@ -354,7 +376,7 @@ def run_engine(broker, settings, strategy_name="ema_cross_rsi", strategy_params=
         from bot.data import fetch_latest_bars
         from bot.risk import position_size, stop_loss as calc_stop, take_profit as calc_tp
 
-        for sym in settings.symbols:
+        for sym in active_symbols:
             try:
                 bars = fetch_latest_bars(sym, lookback=100)
                 if bars is None or bars.empty or len(bars) < 21:
@@ -433,7 +455,7 @@ def run_engine(broker, settings, strategy_name="ema_cross_rsi", strategy_params=
         # Step 5: Daily rebalance at market open (once per day)
         if current_day != prev_day and not has_rebalanced_today:
             has_rebalanced_today = True
-            await _daily_rebalance(broker, internal_pos, settings, equity, now_str)
+            await _daily_rebalance(broker, internal_pos, active_symbols, equity, now_str)
 
         # Step 6: Persist positions state
         engine_state.save_positions(internal_pos)
@@ -446,15 +468,15 @@ def run_engine(broker, settings, strategy_name="ema_cross_rsi", strategy_params=
             cycle_counter[0], equity, len(internal_pos), has_rebalanced_today,
         )
 
-    async def _daily_rebalance(broker_obj, positions_dict, settngs_obj, eq, ts_now):
+    async def _daily_rebalance(broker_obj, positions_dict, symbols_list, eq, ts_now):
         """Rebalance portfolio weights at market open. Ensures all tracked symbols
         have proportional exposure based on target percentages."""
-        target_pct = 1.0 / max(len(settngs_obj.symbols), 1)
+        target_pct = 1.0 / max(len(symbols_list), 1)
         total_equity = eq
         target_value = total_equity * target_pct
         logger.info("Daily rebalance triggered: target_weight=%.1f%% per symbol", target_pct * 100)
 
-        for sym in settngs_obj.symbols:
+        for sym in symbols_list:
             if sym not in positions_dict:
                 continue
             pos = positions_dict[sym]
@@ -479,7 +501,7 @@ def run_engine(broker, settings, strategy_name="ema_cross_rsi", strategy_params=
 
     scheduler.add_job(_cycle, "interval", minutes=settings.engine_interval_minutes, id="engine_cycle")
 
-    logger.info("Engine starting — monitoring every %d min for symbols: %s", settings.engine_interval_minutes, settings.symbols)
+    logger.info("Engine starting — monitoring every %d min for symbols: %s", settings.engine_interval_minutes, active_symbols)
 
     try:
         scheduler.start()
@@ -607,8 +629,8 @@ def run_multi_strategy(
     async def _cycle():
         nonlocal last_equity, trade_counts_per_day
 
-        now_str = datetime.utcnow().isoformat()
-        now_dt = datetime.utcnow()
+        now_str = datetime.now(timezone.utc).isoformat()
+        now_dt = datetime.now(timezone.utc)
         current_day = now_dt.strftime("%Y-%m-%d")
         cycle_counter[0] += 1
 

@@ -144,18 +144,17 @@ class GradientBoostedSignal:
         y : Series or array
             Binary target (0/1).
         """
-        X_arr, y_arr = self._prepare_xy(X, y)
+        # Pass a DataFrame (with feature columns) to the underlying estimator so
+        # sklearn/lgbm/xgb all share consistent feature names; this avoids the
+        # "X does not have valid feature names" warning from lightgbm at predict.
+        X_df, y_arr = self._prepare_xy(X, y)
 
         logger.info(
             "Fitting %s on %d samples × %d features (positive rate=%.3f)",
-            self.backend, X_arr.shape[0], X_arr.shape[1], float(np.mean(y_arr)),
+            self.backend, X_df.shape[0], X_df.shape[1], float(np.mean(y_arr)),
         )
 
-        # xgboost/lgbm accept numpy directly; sklearn too.
-        if self.backend == "xgboost":
-            self.model.fit(X_arr, y_arr)
-        else:
-            self.model.fit(X_arr, y_arr)
+        self.model.fit(X_df, y_arr)
 
         self.is_fitted_ = True
         logger.info("Model fit complete. backend=%s", self.backend)
@@ -170,8 +169,10 @@ class GradientBoostedSignal:
         """
         if not self.is_fitted_:
             raise RuntimeError("Model not fitted — call fit() first.")
-        X_arr = self._prepare_x(df)
-        proba = self.model.predict_proba(X_arr)
+        # Pass a DataFrame (with named columns) to keep feature names consistent
+        # with training; otherwise lightgbm/sklearn warn on predict.
+        X_df = self._prepare_x(df)
+        proba = self.model.predict_proba(X_df)
         # Column 1 = P(class==1)
         col_idx = 1 if proba.shape[1] > 1 else 0
         result = proba[:, col_idx]
@@ -211,19 +212,37 @@ class GradientBoostedSignal:
 
     # ── Internal helpers ──────────────────────────────────────────────
     def _prepare_xy(self, X, y):
+        """Validate X/y and return a DataFrame with named feature columns.
+
+        Returning a DataFrame (not a numpy array) lets every backend —
+        lightgbm, xgboost, sklearn — share consistent feature names, so
+        ``feature_names_in_`` matches between fit and predict and we avoid
+        the lightgbm "X does not have valid feature names" warning.
+        """
         if isinstance(X, pd.DataFrame):
-            self.feature_names_ = list(X.columns)
-        X_arr = self._to_array(X)
+            X_df = X.copy()
+            self.feature_names_ = list(X_df.columns)
+        else:
+            arr = self._to_array(X)
+            cols = [f"f{i}" for i in range(arr.shape[1])]
+            X_df = pd.DataFrame(arr, columns=cols)
+            self.feature_names_ = cols
         y_arr = np.asarray(y).ravel().astype(int)
-        if X_arr.shape[0] != y_arr.shape[0]:
+        if X_df.shape[0] != y_arr.shape[0]:
             raise ValueError(
-                f"X/y row mismatch: X={X_arr.shape[0]} y={y_arr.shape[0]}"
+                f"X/y row mismatch: X={X_df.shape[0]} y={y_arr.shape[0]}"
             )
         if len(np.unique(y_arr)) < 2:
             raise ValueError("Target y must contain at least 2 classes for classification.")
-        return X_arr, y_arr
+        return X_df, y_arr
 
-    def _prepare_x(self, df) -> np.ndarray:
+    def _prepare_x(self, df) -> pd.DataFrame:
+        """Validate and reorder predict input to a named-column DataFrame.
+
+        Aligns columns with ``feature_names_`` captured at fit time so the
+        underlying estimator's ``feature_names_in_`` matches and no warning
+        is emitted.
+        """
         if isinstance(df, pd.DataFrame):
             if self.feature_names_ is not None:
                 missing = [c for c in self.feature_names_ if c not in df.columns]
@@ -231,7 +250,11 @@ class GradientBoostedSignal:
                     raise ValueError(f"Missing feature columns at predict: {missing}")
                 df = df[self.feature_names_]
             logger.debug("Predict input DataFrame %d×%d", df.shape[0], df.shape[1])
-        return self._to_array(df)
+            return df
+        arr = self._to_array(df)
+        cols = self.feature_names_ if self.feature_names_ is not None else [f"f{i}" for i in range(arr.shape[1])]
+        return pd.DataFrame(arr, columns=cols)
+
 
     @staticmethod
     def _to_array(df_or_arr) -> np.ndarray:

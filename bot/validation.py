@@ -22,7 +22,7 @@ import json
 import logging
 import math
 from dataclasses import dataclass, field, asdict
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
@@ -820,7 +820,7 @@ class OOSValidator:
             "passed": passed,
             "criteria": self.criteria,
             "ml_metrics": self._ml_metrics,
-            "generated_at": datetime.utcnow().isoformat() + "Z",
+            "generated_at": datetime.now(timezone.utc).isoformat() + "Z",
         }
         logger.info(
             "OOSValidator report: n_trials=%d passed=%s aggregate=%s",

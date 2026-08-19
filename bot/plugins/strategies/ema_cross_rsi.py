@@ -55,8 +55,8 @@ class EmaCrossRsi(Strategy):
         signal = pd.Series(0, index=df.index, dtype="int8")
         signal[cross_up & rsi_oversold_ok] = 1
         signal[cross_down | rsi_overbought] = -1
-        prev_was_exit = (signal.shift(1).fillna(1) == -1).astype(object)
-        mask = ((signal == 1) & ~prev_was_exit).astype(object)
+        prev_was_exit = signal.shift(1).fillna(1).eq(-1)
+        mask = (signal == 1) & ~prev_was_exit
         signal[mask] = 1
 
         return signal

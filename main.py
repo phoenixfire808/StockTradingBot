@@ -32,6 +32,10 @@ def main():
     p_dry = sub.add_parser("dry-run", help="Dry-run engine (MockBroker)")
     p_dry.add_argument("--strategy", default="ema_cross_rsi", help="Strategy to run")
     p_dry.add_argument("--symbols", nargs="+", default=None, help="Override symbols")
+    p_dry.add_argument(
+        "--duration", type=int, default=30,
+        help="Auto-shutdown the engine after N seconds (default: 30). Set to 0 to run forever.",
+    )
 
     # ── live ─────────────────────────────────────────────────────────
     p_live = sub.add_parser("live", help="Live trading via Robinhood MCP")
@@ -54,10 +58,6 @@ def main():
     p_opt.add_argument("--symbols", nargs="+", default=["AAPL"], help="Symbols to optimize on")
     p_opt.add_argument("--start", default="2023-01-01", help="Start date")
     p_opt.add_argument("--end", default=None, help="End date")
-    p_opt.add_argument("--train-window", type=int, default=90, help="Training window in days")
-    p_opt.add_argument("--test-window", type=int, default=30, help="Test window in days")
-    p_opt.add_argument("--cash", type=float, default=100_000, help="Starting cash")
-    p_opt.add_argument("--param-grid", default=None, help="JSON string of param→[values] grid")
 
     # ── multi (multi-strategy) ─────────────────────────────────────
     p_multi = sub.add_parser("multi", help="Run multiple strategies with capital allocation")
@@ -131,7 +131,11 @@ def _cmd_backtest(args, settings, logger):
 
 
 def _cmd_dry_run(args, settings, logger):
-    """Start engine with MockBroker."""
+    """Start engine with MockBroker.
+
+    ``args.duration`` defaults to 30 seconds. Passing 0 disables
+    auto-shutdown and restores the legacy "run forever until Ctrl+C" behavior.
+    """
     from bot.broker import MockBroker
     from bot.engine import run_engine, EngineState
 
@@ -148,11 +152,25 @@ def _cmd_dry_run(args, settings, logger):
     engine_state.save_strategy_confirmation(strategy_name, effective_params, symbols)
 
     broker = MockBroker(starting_equity=settings.cash)
+    duration_seconds = args.duration if args.duration and args.duration > 0 else None
 
     async def _start():
         await broker.test_connection()
-        print("[DRY-RUN] Broker connected (mock mode). Press Ctrl+C to stop.")
-        run_engine(broker, settings, strategy_name=strategy_name, strategy_params=effective_params)
+        if duration_seconds is None:
+            print("[DRY-RUN] Broker connected (mock mode). Press Ctrl+C to stop.")
+        else:
+            print(
+                f"[DRY-RUN] Broker connected (mock mode). "
+                f"Engine will auto-stop after {duration_seconds}s."
+            )
+        run_engine(
+            broker,
+            settings,
+            strategy_name=strategy_name,
+            strategy_params=effective_params,
+            duration_seconds=duration_seconds,
+            symbols=symbols,
+        )
 
     loop = asyncio.new_event_loop()
     try:
@@ -168,6 +186,14 @@ def _cmd_live(args, settings, logger):
 
     strategy_name = args.strategy
     symbols = args.symbols or settings.symbols
+
+    effective_params = {
+        "fast": 9,
+        "slow": 21,
+        "rsi_period": 14,
+        "rsi_entry_max": 70.0,
+        "rsi_exit": 75.0,
+    }
 
     # Build broker from settings
     broker = RobinhoodMcpBroker(settings)
@@ -185,14 +211,6 @@ def _cmd_live(args, settings, logger):
 
     # Strategy confirmation
     engine_state = EngineState()
-    effective_params = {
-        "fast": 9,
-        "slow": 21,
-        "rsi_period": 14,
-        "rsi_entry_max": 70.0,
-        "rsi_exit": 75.0,
-    }
-
     confirmed = engine_state.read_strategy_confirmation()
     needs_confirmation = True
 
@@ -225,19 +243,6 @@ def _cmd_live(args, settings, logger):
     print("\nStarting live engine...\n")
 
     run_engine(broker, settings, strategy_name=strategy_name, strategy_params=effective_params)
-
-
-def _cmd_sentiment(args, settings, logger):
-    """Quick sentiment score check."""
-    from bot.sentiment import SentimentEngine
-
-    engine = SentimentEngine()
-    for sym in args.symbols:
-        score = engine.score(sym, hours=args.hours)
-        print(f"\n{sym} [{args.hours}h]: mentions={score.mentions} bullish={score.bullish} bearish={score.bearish} net_score={score.net_score:.3f}")
-        for post in score.top_posts[:3]:
-            emoji = "🟢" if post.score > 0 else "🔴" if post.score < 0 else "⚪"
-            print(f"  {emoji} [{post.source}] {post.text[:80]}... ({post.score:+.3f})")
 
 
 def _cmd_ui(args, settings, logger):
@@ -282,10 +287,6 @@ def _cmd_optimize(args, settings, logger):
         test_window=args.test_window,
         cash=args.cash,
     )
-
-    # Print summary
-    print("\n" + "=" * 70)
-    print(f"  Walk-Forward Optimization Results: {args.strategy}")
     print("=" * 70)
     print(f"  Best params:        {result.get('best_params', {})}")
     print(f"  Best OOS score:     {result.get('best_score', 'N/A')}")

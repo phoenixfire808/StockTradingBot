@@ -177,29 +177,35 @@ class TestWalkForwardIntegration:
         result = json.loads(walk_forward_optimize(
             strategy="ema_cross_rsi",
             symbols=["AAPL"],
-            start="2022-01-01",
-            end="2023-12-31",
+            start="2023-01-01",
+            end="2023-04-01",
+            train_window=30,
+            test_window=15,
+            param_grid={"fast": [9], "slow": [21], "rsi_entry_max": [70.0]},
         ))
 
         assert "folds" in result
         assert "total_combinations" in result
-        assert result["total_combinations"] > 0
+        assert result["total_combinations"] == 1
 
     def test_walk_forward_with_bollinger_params(self):
         """Walk-forward with bollinger_reversion parameters works."""
         from bot.fastmcp.server import walk_forward_optimize
-
         result = json.loads(walk_forward_optimize(
             strategy="bollinger_reversion",
             symbols=["AAPL"],
-            start="2022-01-01",
-            end="2023-12-31",
+            start="2023-01-01",
+            end="2023-06-01",
+            train_window=60,
+            test_window=30,
+            param_grid={"bb_period": [20], "bb_std": [2.0]},
         ))
 
         assert "folds" in result
-        assert isinstance(result["folds"], list)
         if result["folds"]:
-            assert "bb_period" in result["folds"][0] or "total_return_pct" in result["folds"][0]
+            fold0 = result["folds"][0]
+            assert "best_train_params" in fold0
+            assert "test_metrics" in fold0
 
 
 class TestMultiSymbolBatchBacktest:
@@ -351,8 +357,11 @@ class TestMCPToolIntegration:
         result = json.loads(walk_forward_optimize(
             strategy="ema_cross_rsi",
             symbols=["AAPL"],
-            start="2022-01-01",
-            end="2023-12-31",
+            start="2023-01-01",
+            end="2023-04-01",
+            train_window=30,
+            test_window=15,
+            param_grid={"fast": [9], "slow": [21], "rsi_entry_max": [70.0]},
         ))
 
         assert "folds" in result

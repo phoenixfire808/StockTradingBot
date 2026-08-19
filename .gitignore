@@ -59,3 +59,29 @@ logs/mcp_audit.log
 
 # FastMCP temp files
 .fastmcp/
+
+# Root-level notes / reports (per task)
+/COMMIT_MESSAGE.txt
+/FINAL_STATUS_MESSAGE.md
+/LATEST_TEST_RESULTS.md
+/PROJECT_MEMORY.md
+/PROJECT_MEMORY_FINAL.md
+/RECOMMENDATIONS.md
+/SESSION_CLOSE.md
+/SESSION_REPORT.md
+/STATUS.md
+/TODO.md
+/USER_REPORT.md
+/*_SUMMARY.md
+/*_STATUS.md
+/*_REPORT.md
+/*_HANDOFF.md
+/*_CHECKLIST.md
+/*_RECOMMENDATIONS.md
+/*_MEMORY.md
+/*_ROSTER.md
+/SESSION_END
+
+# Root-level log files (exclude logs/ itself via leading slash)
+tests_run*.log
+/*.log

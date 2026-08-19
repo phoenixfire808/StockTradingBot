@@ -8,7 +8,7 @@ Used by bot/plugins/strategies/sector_rotation.py plugin.
 """
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import pandas as pd
@@ -139,7 +139,7 @@ class SectorRotationModel:
         percentage change over lookback_days.
         """
         target_etfs = etfs or list(SECTOR_ETFS.keys())
-        end_cutoff = datetime.utcnow() - timedelta(minutes=5)
+        end_cutoff = datetime.now(timezone.utc) - timedelta(minutes=5)
 
         # Use cache if fresh (< 1 hour old)
         if (
@@ -197,7 +197,7 @@ class SectorRotationModel:
 
         # Update cache
         self._momentum_cache = results.copy()
-        self._cache_ts = datetime.utcnow()
+        self._cache_ts = datetime.now(timezone.utc)
 
         # Log sector ranking
         ranked = sorted(results.items(), key=lambda x: x[1], reverse=True)

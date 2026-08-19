@@ -7,7 +7,7 @@ persists fetched posts to CSV cache for repeat access.
 import csv
 import hashlib
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -115,7 +115,7 @@ class SentimentEngine:
         from bot.core import SENTIMENT_SOURCES
 
         window_hours = hours if hours is not None else 24
-        cutoff = datetime.utcnow() - timedelta(hours=window_hours)
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=window_hours)
 
         windowed: list[SentimentPost] = []
         sources_working: list[str] = []

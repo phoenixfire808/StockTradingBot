@@ -11,7 +11,7 @@ Exposes:
 """
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from itertools import product
 from typing import Any
 
@@ -61,7 +61,7 @@ def _generate_windows(
     if end:
         end_dt = datetime.strptime(end, "%Y-%m-%d")
     else:
-        end_dt = datetime.utcnow()
+        end_dt = datetime.now(timezone.utc)
 
     windows: list[dict[str, str]] = []
     cursor = start_dt
